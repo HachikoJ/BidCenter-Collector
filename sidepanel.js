@@ -77,6 +77,7 @@ async function initializeSidepanel() {
   document.querySelectorAll('[data-app-version]').forEach((element) => {
     element.textContent = `v${version}`;
   });
+  renderKeywordOptions();
   const stored = await chrome.storage.local.get(ACTIVATION_STORAGE_KEY);
   const isActivated = stored[ACTIVATION_STORAGE_KEY]?.activated === true;
   showActivationView(isActivated);
@@ -399,16 +400,51 @@ function renderKeywordManager() {
 
 function renderKeywordOptions() {
   const selected = $('#keyword').value.trim();
-  const placeholder = document.createElement('option');
-  placeholder.value = '';
-  placeholder.textContent = '选择常用关键词';
-  $('#keyword-options').replaceChildren(placeholder, ...keywordOptions.map((keyword) => {
-    const option = document.createElement('option');
-    option.value = keyword;
+  $('#keyword-options').replaceChildren(...keywordOptions.map((keyword, index) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.id = `keyword-option-${index}`;
+    option.className = 'keyword-option';
+    option.setAttribute('role', 'option');
     option.textContent = keyword;
+    option.addEventListener('click', () => {
+      $('#keyword').value = keyword;
+      keywordDirty = true;
+      syncKeywordControls();
+      setKeywordDropdown(false);
+      $('#keyword').focus();
+    });
     return option;
   }));
-  $('#keyword-options').value = keywordOptions.includes(selected) ? selected : '';
+  $('#keyword-toggle').disabled = !keywordOptions.length;
+  $('#keyword-toggle').title = keywordOptions.length ? '选择常用关键词' : '暂无常用关键词';
+  syncKeywordControls(selected);
+}
+
+function setKeywordDropdown(open) {
+  const visible = Boolean(open && keywordOptions.length);
+  $('#keyword-options').hidden = !visible;
+  $('#keyword').setAttribute('aria-expanded', String(visible));
+  $('#keyword-toggle').setAttribute('aria-expanded', String(visible));
+  $('#keyword-toggle').classList.toggle('open', visible);
+}
+
+function syncKeywordControls(value = $('#keyword').value.trim()) {
+  const normalized = value.toLocaleLowerCase('zh-CN');
+  const selectedIndex = keywordOptions.findIndex((keyword) => keyword.toLocaleLowerCase('zh-CN') === normalized);
+  const addButton = $('#add-keyword');
+  const duplicate = selectedIndex >= 0;
+  addButton.disabled = !value || duplicate;
+  addButton.title = !value
+    ? '请先输入关键词'
+    : duplicate ? '该关键词已存在，无需重复添加' : '添加到常用关键词';
+  [...$('#keyword-options').children].forEach((option, index) => {
+    const selected = index === selectedIndex;
+    option.classList.toggle('selected', selected);
+    option.setAttribute('aria-selected', String(selected));
+  });
+  if (selectedIndex >= 0) $('#keyword').setAttribute('aria-activedescendant', `keyword-option-${selectedIndex}`);
+  else $('#keyword').removeAttribute('aria-activedescendant');
 }
 
 function syncKeywordOptions(values = []) {
@@ -574,7 +610,7 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
   $('#failed-count').textContent = state.batchFailed || partialFailed || state.records?.filter((record) => record.采集状态 === '失败').length || 0;
   if (state.keyword && !keywordDirty) {
     $('#keyword').value = state.keyword;
-    $('#keyword-options').value = keywordOptions.includes(state.keyword) ? state.keyword : '';
+    syncKeywordControls();
   }
   $('#last-action').textContent = state.lastTitle ? `最近：${state.lastTitle}` : state.updatedAt ? `更新于 ${formatTime(state.updatedAt)}` : '尚未开始任务';
   if (!settingsDirty) {
@@ -834,28 +870,46 @@ $('#interval-decrease').addEventListener('click', () => adjustInterval(-100));
 $('#interval-increase').addEventListener('click', () => adjustInterval(100));
 $('#keyword').addEventListener('input', () => {
   keywordDirty = true;
-  const keyword = $('#keyword').value.trim();
-  $('#keyword-options').value = keywordOptions.includes(keyword) ? keyword : '';
+  syncKeywordControls();
 });
-$('#keyword-options').addEventListener('change', () => {
-  const keyword = $('#keyword-options').value;
-  if (!keyword) return;
-  $('#keyword').value = keyword;
-  keywordDirty = true;
+$('#keyword').addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    setKeywordDropdown(true);
+    $('#keyword-options .selected, #keyword-options .keyword-option')?.focus();
+  } else if (event.key === 'Escape') {
+    setKeywordDropdown(false);
+  }
+});
+$('#keyword-toggle').addEventListener('click', () => setKeywordDropdown($('#keyword-options').hidden));
+$('#keyword-options').addEventListener('keydown', (event) => {
+  const options = [...$('#keyword-options').querySelectorAll('.keyword-option')];
+  const currentIndex = options.indexOf(document.activeElement);
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    setKeywordDropdown(false);
+    $('#keyword').focus();
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    const direction = event.key === 'ArrowDown' ? 1 : -1;
+    options[(currentIndex + direction + options.length) % options.length]?.focus();
+  }
 });
 $('#add-keyword').addEventListener('click', async () => {
   const keyword = $('#keyword').value.trim();
-  if (!keyword) {
+  const duplicate = keywordOptions.some((value) => value.toLocaleLowerCase('zh-CN') === keyword.toLocaleLowerCase('zh-CN'));
+  if (!keyword || duplicate) {
+    syncKeywordControls();
     $('#keyword').focus();
     return;
   }
   keywordOptions = normalizeKeywordOptions([...keywordOptions, keyword]);
   await saveKeywordOptions();
-  $('#keyword-options').value = keyword;
   $('#add-keyword').textContent = '✓';
   setTimeout(() => { $('#add-keyword').textContent = '+'; }, 1200);
 });
 $('#manage-keywords').addEventListener('click', () => {
+  setKeywordDropdown(false);
   setKeywordManagerFeedback();
   renderKeywordManager();
   $('#keyword-manager-dialog').showModal();
@@ -863,6 +917,9 @@ $('#manage-keywords').addEventListener('click', () => {
 $('#close-keyword-manager').addEventListener('click', () => $('#keyword-manager-dialog').close());
 $('#keyword-manager-dialog').addEventListener('click', (event) => {
   if (event.target === event.currentTarget) event.currentTarget.close();
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('#keyword-combobox')) setKeywordDropdown(false);
 });
 $('#diagnose').addEventListener('click', async () => {
   const state = await getState();
