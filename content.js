@@ -845,6 +845,15 @@ async function processResults() {
   try {
     let state = await taskState();
     if (!['searching', 'filtering', 'running'].includes(state.status)) return;
+    const recordedTotalPages = Math.max(0, Number(state.totalPages) || 0);
+    const recordedCurrentPage = Math.max(1, Number(state.currentPage) || 1);
+    const recordedCompletedPages = state.completedPages || [];
+    if (recordedTotalPages && recordedCurrentPage > recordedTotalPages
+      && recordedCompletedPages.includes(recordedTotalPages)) {
+      addLog('success', '检测到分页已全部完成', `断点 ${recordedCurrentPage}/${recordedTotalPages}，不再尝试越界页`);
+      continueNextPage = await finishInformationType(state, recordedCompletedPages);
+      return;
+    }
     const timeReady = await ensureTimeRange();
     state = await taskState();
     if (!['searching', 'filtering', 'running'].includes(state.status)) return;
@@ -879,7 +888,9 @@ async function processResults() {
     const currentUrl = location.href;
     const currentPage = pageNumber();
     const pageEntries = entries;
-    await saveTask({ status: 'running', currentType: targetType, currentPage, totalPages: totalPageNumber(), currentPageCount: pageEntries.length, listUrl: currentUrl, error: '' });
+    const detectedTotalPages = totalPageNumber();
+    const knownTotalPages = detectedTotalPages || Math.max(0, Number(state.totalPages) || 0);
+    await saveTask({ status: 'running', currentType: targetType, currentPage, totalPages: knownTotalPages, currentPageCount: pageEntries.length, listUrl: currentUrl, error: '' });
     const existing = state.records || [];
     const pendingEntries = pageEntries.filter((entry) => !existing.some((record) =>
       record.网址 === entry.url || (infoIdFromUrl(entry.url) && record.信息id === infoIdFromUrl(entry.url))));
@@ -945,6 +956,11 @@ async function processResults() {
     state = await taskState();
     if (state.status !== 'running') return;
     const completedPages = [...new Set([...(state.completedPages || []), currentPage])];
+    if (knownTotalPages && currentPage >= knownTotalPages) {
+      addLog('success', '已完成最后一页', `${currentPage}/${knownTotalPages}，停止翻页`);
+      continueNextPage = await finishInformationType(state, completedPages);
+      return;
+    }
     const next = nextPageButton();
     if (!next) {
       continueNextPage = await finishInformationType(state, completedPages);
