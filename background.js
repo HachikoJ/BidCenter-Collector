@@ -1,6 +1,8 @@
 const DETAIL_TIMEOUT = 45000;
 const DETAIL_STAGGER_MIN_MS = 100;
 const DETAIL_STAGGER_MAX_MS = 3000;
+const DETAIL_INTERVAL_JITTER_MIN_MS = -2000;
+const DETAIL_INTERVAL_JITTER_MAX_MS = 2000;
 const DEFAULT_SETTINGS = {
   intervalMs: 5000,
   concurrency: 3,
@@ -28,6 +30,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDetailStaggerMs = () => Math.floor(
   Math.random() * (DETAIL_STAGGER_MAX_MS - DETAIL_STAGGER_MIN_MS + 1)
 ) + DETAIL_STAGGER_MIN_MS;
+const randomDetailIntervalJitterMs = () => Math.floor(
+  Math.random() * (DETAIL_INTERVAL_JITTER_MAX_MS - DETAIL_INTERVAL_JITTER_MIN_MS + 1)
+) + DETAIL_INTERVAL_JITTER_MIN_MS;
+const effectiveDetailIntervalMs = (baseIntervalMs, jitterMs) => Math.max(200, baseIntervalMs + jitterMs);
 
 async function requireActivation() {
   const stored = await chrome.storage.local.get(ACTIVATION_STORAGE_KEY);
@@ -455,13 +461,13 @@ async function runDetailBatch(entries) {
   await requireMemberLogin({ preferredTabId: batchTask.listTabId, allowProbe: false });
   const settings = normalizeSettings(batchTask.settings);
   await saveTask({ batchTotal: entries.length, batchDone: 0, batchFailed: 0 });
-  await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，间隔 ${settings.intervalMs}ms，每次启动随机错峰 0.1-3 秒`);
+  await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，基础间隔 ${settings.intervalMs}ms（每条随机 ±2 秒），每次启动随机错峰 0.1-3 秒`);
   const results = new Array(entries.length);
   let nextIndex = 0;
   const workerLastOpenAt = new Map();
   let staggerQueue = Promise.resolve();
 
-  async function openStaggeredDetail(entry, workerId) {
+  async function openStaggeredDetail(entry, workerId, intervalTiming) {
     const previousLaunch = staggerQueue;
     let releaseLaunch;
     staggerQueue = new Promise((resolve) => { releaseLaunch = resolve; });
@@ -486,7 +492,11 @@ async function runDetailBatch(entries) {
         await markDailyLimitReached(quota.usage);
         return null;
       }
-      await log('info', `并发通道 ${workerId} 错峰启动详情`, `随机等待 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
+      const jitterLabel = intervalTiming.jitterMs >= 0 ? `+${intervalTiming.jitterMs}` : String(intervalTiming.jitterMs);
+      const intervalLabel = intervalTiming.hasPrevious
+        ? `基础间隔 ${intervalTiming.baseMs}ms，随机偏移 ${jitterLabel}ms，实际 ${intervalTiming.actualMs}ms；`
+        : '本通道首条无需前序间隔；';
+      await log('info', `并发通道 ${workerId} 错峰启动详情`, `${intervalLabel}启动错峰 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
       const opened = await openSilentDetail(entry.url, entry.title);
       return opened;
     } finally {
@@ -510,21 +520,29 @@ async function runDetailBatch(entries) {
       nextIndex += 1;
       const entry = entries[index];
       try {
-        const intervalMs = normalizeSettings(state.settings).intervalMs;
+        const intervalJitterMs = randomDetailIntervalJitterMs();
+        let intervalMs = normalizeSettings(state.settings).intervalMs;
+        let actualIntervalMs = effectiveDetailIntervalMs(intervalMs, intervalJitterMs);
         const now = Date.now();
         const lastOpenAt = workerLastOpenAt.get(workerId) || 0;
-        const scheduledAt = Math.max(now, lastOpenAt + intervalMs);
+        const scheduledAt = Math.max(now, lastOpenAt + actualIntervalMs);
         if (scheduledAt > now) await sleep(scheduledAt - now);
         state = await taskState();
         if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
-        const resumedIntervalMs = normalizeSettings(state.settings).intervalMs;
-        const resumedScheduledAt = lastOpenAt + resumedIntervalMs;
+        intervalMs = normalizeSettings(state.settings).intervalMs;
+        actualIntervalMs = effectiveDetailIntervalMs(intervalMs, intervalJitterMs);
+        const resumedScheduledAt = lastOpenAt + actualIntervalMs;
         if (resumedScheduledAt > Date.now()) {
           await sleep(resumedScheduledAt - Date.now());
           state = await taskState();
           if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
         }
-        const opened = await openStaggeredDetail(entry, workerId);
+        const opened = await openStaggeredDetail(entry, workerId, {
+          baseMs: intervalMs,
+          jitterMs: intervalJitterMs,
+          actualMs: actualIntervalMs,
+          hasPrevious: Boolean(lastOpenAt)
+        });
         if (!opened) return;
         workerLastOpenAt.set(workerId, opened.openedAt);
         const record = await opened.result;

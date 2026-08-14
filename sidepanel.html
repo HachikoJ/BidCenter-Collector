@@ -136,7 +136,7 @@
           </div>
         </details>
         <div class="settings-grid">
-          <label class="setting-field"><span>详情间隔</span>
+          <label class="setting-field"><span title="每条详情会在设置值基础上随机偏移 -2 至 +2 秒">详情间隔（±2s）</span>
             <span class="stepper-wrap">
               <span class="stepper">
                 <button id="interval-decrease" class="stepper-button" type="button" aria-label="减少详情间隔" title="减少 100 毫秒">−</button>
@@ -213,7 +213,7 @@
               <li>短正文稳定后正常采集，空正文快速结束，单条详情不再长期占用并发槽。</li>
               <li>信息详情保留短正文或外部原文链接，便于后续打开和核对。</li>
               <li>检测到官网滑块验证时暂停任务，人工完成后自动续采，不再定时刷新验证页。</li>
-              <li>详情间隔默认调整为 5000ms，暂停后修改间隔会在继续任务时立即生效。</li>
+              <li>详情基础间隔默认 5000ms，每条随机偏移 -2 至 +2 秒；暂停后修改会在继续任务时立即生效。</li>
               <li>并发通道启动详情时随机错峰 0.1-3 秒，避免同一时刻集中打开。</li>
             </ul>
           </article>
