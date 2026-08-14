@@ -1,0 +1,14 @@
+.DS_Store
+.playwright-cli/
+output/
+*.log
+*.crx
+*.pem
+*.key
+.env
+.env.*
+
+# 本地生成物与不公开资料
+采招网采集助手（请选择此文件夹）/
+采招网采集助手.zip
+采招网会员导出模板.xls

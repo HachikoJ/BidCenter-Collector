@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="sidepanel.css">
+    <title>采招网采集助手</title>
+  </head>
+  <body>
+    <section id="activation-screen" class="activation-screen" aria-labelledby="activation-title">
+      <div class="activation-shell">
+        <header class="activation-brand">
+          <img class="activation-logo" src="logo.svg" alt="采招网采集助手 logo">
+          <div>
+            <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
+            <strong>采招网采集助手</strong>
+          </div>
+        </header>
+
+        <div class="activation-content">
+          <h2 id="activation-title">扫码获取激活码</h2>
+          <p class="activation-free-notice"><strong>本采集工具永久免费，警惕任何收费行为。</strong></p>
+          <div class="activation-qr-card">
+            <img class="activation-qr-image" src="activation-qr.jpg" alt="兔云兔微信公众号二维码">
+          </div>
+          <ol id="activation-steps" class="activation-steps">
+            <li><span>1</span><div><strong>微信扫码关注“兔云兔”</strong></div></li>
+            <li><span>2</span><div><strong>发送：<mark>采招网采集助手</mark></strong><small>公众号将自动回复激活码</small></div></li>
+          </ol>
+          <form id="activation-form" novalidate>
+            <label for="activation-input">输入激活码</label>
+            <div class="activation-input-row">
+              <input id="activation-input" type="text" inputmode="numeric" maxlength="11" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="请输入激活码" aria-describedby="activation-steps activation-feedback">
+              <button id="activate-button" class="primary" type="submit">立即激活</button>
+            </div>
+            <p id="activation-feedback" class="activation-feedback" aria-live="polite"></p>
+          </form>
+          <div class="activation-disclaimer">
+            <strong>免责声明</strong>
+            <p>用户应自行遵守目标网站规则并合理设置访问频率。因用户自行调整访问频率或其他不当操作导致的账号限制、封禁等情况，本平台概不承担责任。</p>
+          </div>
+        </div>
+
+        <footer class="activation-footer">
+          <span><strong>版权所有人</strong> Wilson</span>
+          <span><strong>联系方式</strong> 18682408521</span>
+          <a class="project-link" href="https://github.com/HachikoJ/BidCenter-Collector" target="_blank" rel="noopener noreferrer" title="访问 GitHub 公开项目">GitHub 开源项目</a>
+          <span>MIT 开源许可 · 请合理使用，不得滥用</span>
+        </footer>
+      </div>
+    </section>
+
+    <main id="app-shell" class="workspace" hidden>
+      <header class="topbar">
+        <img class="brand-logo" src="logo.svg" alt="采招网采集助手 logo">
+        <div class="brand-copy">
+          <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
+          <h1>采招网采集助手</h1>
+        </div>
+        <span id="status-dot" class="status-dot" aria-label="任务状态" title="任务状态"></span>
+      </header>
+
+      <section class="hero-status" aria-live="polite">
+        <div class="status-heading"><span class="eyebrow">当前任务</span><span id="elapsed-time" class="status-caption">尚未计时</span></div>
+        <div id="status" class="status">正在读取任务状态…</div>
+        <div id="time-estimate" class="time-estimate" title="根据分页数量、间隔、并发数和本次实际速度动态估算">预计耗时：开始后计算</div>
+        <div class="progress-track" aria-hidden="true"><span id="progress-bar"></span></div>
+        <div class="progress-meta"><span id="progress-label">等待开始</span><span id="progress-percent">0%</span></div>
+        <div class="metrics" aria-label="任务指标">
+          <div class="metric"><span class="metric-label">已采集</span><span class="metric-value" id="record-count">0</span></div>
+          <div class="metric"><span class="metric-label">页码</span><span class="metric-value" id="current-page">-/-</span></div>
+          <div class="metric"><span class="metric-label">今日访问</span><span class="metric-value" id="quota-count">0/780</span></div>
+          <div class="metric"><span class="metric-label">错误</span><span class="metric-value error-value" id="failed-count">0</span></div>
+        </div>
+      </section>
+
+      <section class="search-panel">
+        <div class="section-heading"><span>采集控制</span><small>浏览器当前会话</small></div>
+        <label class="field-label" for="keyword">搜索关键词</label>
+        <div class="keyword-input-row">
+          <input id="keyword" value="智慧交通" maxlength="80" autocomplete="off" placeholder="输入搜索关键词">
+          <select id="keyword-options" aria-label="选择常用关键词">
+            <option value="">常用词</option>
+            <option value="智慧交通" selected>智慧交通</option>
+            <option value="交通基础设施">交通基础设施</option>
+            <option value="自然保护地">自然保护地</option>
+          </select>
+          <button id="add-keyword" class="add-keyword" type="button" aria-label="添加到常用关键词" title="添加到常用关键词">+</button>
+          <button id="manage-keywords" class="manage-keywords" type="button" aria-label="编辑常用关键词" title="编辑常用关键词">编辑</button>
+        </div>
+        <div class="time-filter" aria-label="检索时间">
+          <span class="time-filter-label">检索时间</span>
+          <span class="time-mode-control" role="group" aria-label="时间范围模式">
+            <button type="button" data-time-mode="previous_calendar_month" class="selected">上月</button>
+            <button type="button" data-time-mode="custom">自定义</button>
+          </span>
+          <time id="time-range-summary">自动计算</time>
+        </div>
+        <div id="custom-time-range" class="custom-time-range" hidden>
+          <input id="time-start" type="date" aria-label="开始日期">
+          <span>至</span>
+          <input id="time-end" type="date" aria-label="结束日期">
+        </div>
+        <details class="type-filter">
+          <summary><span>信息类型</span><small id="type-filter-summary">招标公告、中标结果 · 2/10</small></summary>
+          <div id="information-types" class="type-options" role="group" aria-label="选择信息类型">
+            <label class="type-option"><input type="checkbox" value="招标公告" checked><span>招标公告</span></label>
+            <label class="type-option"><input type="checkbox" value="招标变更"><span>招标变更</span></label>
+            <label class="type-option"><input type="checkbox" value="中标结果" checked><span>中标结果</span></label>
+            <label class="type-option"><input type="checkbox" value="采购信息"><span>采购信息</span></label>
+            <label class="type-option"><input type="checkbox" value="招标预告"><span>招标预告</span></label>
+            <label class="type-option"><input type="checkbox" value="审批公示"><span>审批公示</span></label>
+            <label class="type-option"><input type="checkbox" value="拍卖转让"><span>拍卖转让</span></label>
+            <label class="type-option"><input type="checkbox" value="土地挂牌"><span>土地挂牌</span></label>
+            <label class="type-option"><input type="checkbox" value="司法拍卖"><span>司法拍卖</span></label>
+            <label class="type-option"><input type="checkbox" value="其它公告"><span>其它公告</span></label>
+          </div>
+        </details>
+        <details class="advanced-filter">
+          <summary><span>高级筛选</span><small id="advanced-filter-summary">全部 · 词 0/10</small></summary>
+          <div class="advanced-filter-body">
+            <div class="advanced-select-grid">
+              <label><span>采购方式</span><select id="filter-purchase-method"><option value="全部">全部</option></select></label>
+              <label><span>资金来源</span><select id="filter-funding-source"><option value="全部">全部</option></select></label>
+              <label><span>评标办法</span><select id="filter-evaluation-method"><option value="全部">全部</option></select></label>
+              <label><span>资质证书</span><select id="filter-qualification-certificate"><option value="全部">全部</option></select></label>
+            </div>
+            <div class="word-filter-row" data-word-kind="exclude">
+              <span>排除词 <small id="exclude-word-count">0/5</small></span>
+              <div class="word-input-row"><input id="exclude-word-input" maxlength="10" placeholder="最多 10 个字"><button id="add-exclude-word" type="button" aria-label="添加排除词" title="添加排除词">+</button></div>
+              <div id="exclude-word-chips" class="word-chips"></div>
+            </div>
+            <div class="word-filter-row" data-word-kind="related">
+              <span>相关词 <small id="related-word-count">0/5</small></span>
+              <div class="word-input-row"><input id="related-word-input" maxlength="10" placeholder="最多 10 个字"><button id="add-related-word" type="button" aria-label="添加相关词" title="添加相关词">+</button></div>
+              <div id="related-word-chips" class="word-chips"></div>
+            </div>
+          </div>
+        </details>
+        <div class="settings-grid">
+          <label class="setting-field"><span>详情间隔</span>
+            <span class="stepper-wrap">
+              <span class="stepper">
+                <button id="interval-decrease" class="stepper-button" type="button" aria-label="减少详情间隔" title="减少 100 毫秒">−</button>
+                <input id="interval" type="number" min="200" max="30000" step="100" value="3000" inputmode="numeric" aria-label="详情间隔（毫秒）">
+                <button id="interval-increase" class="stepper-button" type="button" aria-label="增加详情间隔" title="增加 100 毫秒">+</button>
+              </span>
+              <small>ms</small>
+            </span>
+          </label>
+          <label class="setting-field"><span>并发数</span>
+            <span id="concurrency-control" class="segmented-control" role="group" aria-label="并发数">
+              <button type="button" data-concurrency="1">1</button>
+              <button type="button" data-concurrency="2">2</button>
+              <button type="button" data-concurrency="3" class="selected">3</button>
+              <button type="button" data-concurrency="4">4</button>
+              <button type="button" data-concurrency="5">5</button>
+              <button type="button" data-concurrency="6">6</button>
+            </span>
+            <input id="concurrency" type="hidden" value="3">
+          </label>
+        </div>
+        <div class="login-required-note"><strong>会员登录必检</strong><span>未登录时不会启动或继续采集</span></div>
+        <div class="action-grid">
+          <button id="start" class="primary">开始</button>
+          <button id="pause">暂停</button>
+          <button id="resume">继续</button>
+          <button id="stop" class="danger">停止</button>
+        </div>
+        <div class="utility-row">
+          <button id="export" class="export">导出 Excel</button>
+          <button id="diagnose" class="utility-button">诊断任务</button>
+          <button id="clear" class="utility-button clear-task">清空任务</button>
+          <button id="factory-reset" class="utility-button factory-reset" title="恢复出厂设置（保留今日访问计数）">恢复出厂</button>
+        </div>
+      </section>
+
+      <section class="console-panel">
+        <div class="panel-heading">
+          <div><strong>操作日志</strong><span id="log-count">0 条</span></div>
+          <div class="panel-tools">
+            <select id="log-filter" aria-label="日志级别">
+              <option value="all">全部</option>
+              <option value="error">错误</option>
+              <option value="warn">警告</option>
+              <option value="success">成功</option>
+              <option value="info">信息</option>
+            </select>
+            <button id="copy-logs" class="icon-button" title="复制日志" aria-label="复制日志">复制</button>
+          </div>
+        </div>
+        <div id="logs" class="logs" role="log" aria-live="polite"></div>
+      </section>
+
+      <section class="console-panel debug-console">
+        <div class="panel-heading">
+          <div><strong>系统调试</strong><span id="debug-count">0 条</span></div>
+          <div class="panel-tools">
+            <button id="copy-debug" class="icon-button" type="button" title="复制系统错误诊断">复制</button>
+            <button id="clear-debug" class="icon-button" type="button" title="清空系统错误记录">清空</button>
+          </div>
+        </div>
+        <div id="debug-logs" class="debug-logs" role="log" aria-live="polite">
+          <div class="debug-empty">暂无插件运行错误</div>
+        </div>
+      </section>
+
+      <footer class="footer-row">
+        <span id="last-action">尚未开始任务</span>
+        <a class="project-link" href="https://github.com/HachikoJ/BidCenter-Collector" target="_blank" rel="noopener noreferrer" title="访问 GitHub 公开项目">GitHub 开源项目</a>
+        <span class="copyright-meta">© 2026 Wilson · 18682408521 · MIT</span>
+      </footer>
+
+      <dialog id="keyword-manager-dialog" class="keyword-manager-dialog" aria-labelledby="keyword-manager-title">
+        <div class="keyword-manager-shell">
+          <div class="keyword-manager-heading">
+            <div><strong id="keyword-manager-title">管理常用关键词</strong><small>修改后保存，或直接删除</small></div>
+            <button id="close-keyword-manager" class="keyword-dialog-close" type="button" aria-label="关闭关键词管理" title="关闭">×</button>
+          </div>
+          <div id="keyword-manager-list" class="keyword-manager-list"></div>
+          <p id="keyword-manager-feedback" class="keyword-manager-feedback" aria-live="polite"></p>
+        </div>
+      </dialog>
+    </main>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>
