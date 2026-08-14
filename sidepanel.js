@@ -468,7 +468,9 @@ function statusLabel(state) {
         : `正在应用${state.timeFilterMode === 'custom' ? '自定义' : '上个月整月'}时间范围…`,
     running: state.batchTotal ? `${type}正在批量读取 · ${batch}` : `${type}正在读取列表 · ${batch}`,
     paused: `${type}任务已暂停，运行耗时已停止；点击“继续”恢复。`,
-    verification_wait: `网站验证等待中 · ${Math.max(0, Math.ceil(((state.verificationUntil || 0) - Date.now()) / 1000))} 秒`,
+    verification_wait: state.verificationMode === 'manual'
+      ? '网站要求滑块验证 · 请在已打开的验证页手动完成，完成后自动继续。'
+      : `访问频控冷却中 · ${Math.max(0, Math.ceil(((state.verificationUntil || 0) - Date.now()) / 1000))} 秒后重试`,
     daily_limit: `今日插件访问已达 ${latestQuota.used}/${latestQuota.limit}，断点已保存；次日点击“继续”。`,
     login_required: state.error || '请先登录采招网会员账号，再开始或继续采集。',
     stopped: '任务已停止，请尽快导出 Excel，避免结果失效后无法下载。',
@@ -591,7 +593,7 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
   const label = statusLabel(state);
   const bar = progress(state);
   $('#status').textContent = label;
-  $('#status').className = `status ${state.status === 'error' ? 'error' : state.status === 'login_required' ? 'warning' : ''}`;
+  $('#status').className = `status ${state.status === 'error' ? 'error' : ['login_required', 'verification_wait'].includes(state.status) ? 'warning' : ''}`;
   const dotMap = { error: 'error', login_required: 'waiting', verification_wait: 'waiting', daily_limit: 'waiting', paused: 'paused', stopped: 'paused', complete: 'complete' };
   const dotStatus = ['running', 'searching', 'filtering'].includes(state.status) ? 'running' : (dotMap[state.status] || '');
   $('#status-dot').className = `status-dot ${dotStatus}`;

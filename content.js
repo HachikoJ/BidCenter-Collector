@@ -802,20 +802,31 @@ function isSearchResultsLocation() {
 }
 
 function isVerificationLocation() {
-  return location.hostname === 'shuju.bidcenter.com.cn'
-    && /HumanMachineVerification|403\.shtml/i.test(location.pathname);
+  return (location.hostname === 'shuju.bidcenter.com.cn'
+      && /HumanMachineVerification|403\.shtml/i.test(location.pathname))
+    || (location.hostname === 'search.bidcenter.com.cn' && /\/alivalidate\/?$/i.test(location.pathname));
+}
+
+function sliderVerificationVisible() {
+  const body = document.body?.innerText || '';
+  return (location.hostname === 'search.bidcenter.com.cn' && /\/alivalidate\/?$/i.test(location.pathname))
+    || /请按住滑块|拖动到最右边|滑块验证/.test(body)
+    || Boolean(document.querySelector(
+      '#aliyunCaptcha-sliding-wrapper, #aliyunCaptcha-sliding-slider, .aliyun-captcha, [class*="nc_wrapper"], [class*="nc-container"]'
+    ));
 }
 
 function verificationVisible() {
   const body = document.body?.innerText || '';
-  return isVerificationLocation()
-    || /人机验证|安全验证|请完成验证|滑动验证|访问在一定时间内过于频繁|访问过于频繁/.test(body);
+  return isVerificationLocation() || sliderVerificationVisible()
+    || /人机验证|安全验证|请完成验证|滑动验证|访问出现异常|访问在一定时间内过于频繁|访问过于频繁/.test(body);
 }
 
 async function waitAndReloadAfterVerification() {
   const body = document.body?.innerText || '';
-  const riskType = /访问在一定时间内过于频繁|访问过于频繁|403\.shtml/i.test(`${location.pathname} ${body}`)
-    ? 'frequency' : 'verification';
+  const riskType = sliderVerificationVisible() ? 'slider'
+    : /访问在一定时间内过于频繁|访问过于频繁|403\.shtml/i.test(`${location.pathname} ${body}`)
+      ? 'frequency' : 'verification';
   await chrome.runtime.sendMessage({ type: 'HUMAN_VERIFICATION', url: location.href, riskType });
 }
 
@@ -986,20 +997,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     await waitAndReloadAfterVerification();
     return;
   }
+  const initialState = await taskState();
+  if (initialState.status === 'verification_wait') {
+    await chrome.runtime.sendMessage({ type: 'VERIFICATION_COMPLETED', url: location.href });
+  }
   if (/#\/des\/customDesSearch\/\d+/i.test(location.hash)) {
     const ready = await waitForDetailReady();
     if (ready) await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_READY', record: scrapeDetail() });
     else await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_FAILED', error: '详情页未出现可采集内容。' });
     return;
-  }
-  const state = await taskState();
-  if (isSearchResultsLocation() && state.status === 'verification_wait') {
-    const now = Date.now();
-    const pausedAt = Date.parse(state.pausedAt || state.updatedAt || '');
-    const totalPausedMs = Math.max(0, Number(state.totalPausedMs) || 0)
-      + (Number.isFinite(pausedAt) ? Math.max(0, now - pausedAt) : 0);
-    await saveTask({ status: 'running', verificationUntil: 0, error: '', pausedAt: '', totalPausedMs });
-    addLog('info', '验证等待结束，结果页已恢复');
   }
   const latestState = await taskState();
   if (isSearchResultsLocation()) await publishOfficialAdvancedFilterOptions();

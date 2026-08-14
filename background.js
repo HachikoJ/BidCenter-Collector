@@ -314,6 +314,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     typeFilterApplied: false, typeFilterPending: '', filterStage: '',
     timeFilterMode: settings.timeFilterMode, timeRangeStart: timeRange.start, timeRangeEnd: timeRange.end,
     timeFilterApplied: false, listUrl: url, awaitingSignature: '', error: '',
+    verificationUntil: 0, verificationMode: '', verificationRiskType: '', verificationTabIds: [], verificationUrl: '',
     advancedFilters: settings.advancedFilters, excludeWords: settings.excludeWords,
     relatedWords: settings.relatedWords, advancedFiltersApplied: false,
     startedAt: new Date().toISOString(), pausedAt: '', totalPausedMs: 0, endedAt: '',
@@ -361,15 +362,22 @@ function normalizeSettings(value = {}) {
   };
 }
 
+function armDetailTimeout(tabId, pending) {
+  clearTimeout(pending.timer);
+  pending.timer = setTimeout(async () => {
+    if (activeDetailTabs.get(tabId) !== pending) return;
+    activeDetailTabs.delete(tabId);
+    await clearVerification(tabId);
+    chrome.tabs.remove(tabId).catch(() => undefined);
+    pending.reject(new Error('详情页在 45 秒内未完成采集。'));
+  }, DETAIL_TIMEOUT);
+}
+
 function waitForDetail(tabId, url, title) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(async () => {
-      activeDetailTabs.delete(tabId);
-      await clearVerification(tabId);
-      chrome.tabs.remove(tabId).catch(() => undefined);
-      reject(new Error('详情页在 45 秒内未完成采集。'));
-    }, DETAIL_TIMEOUT);
-    activeDetailTabs.set(tabId, { resolve, reject, timer, url, title });
+    const pending = { resolve, reject, timer: 0, url, title };
+    activeDetailTabs.set(tabId, pending);
+    armDetailTimeout(tabId, pending);
   });
 }
 
@@ -389,10 +397,23 @@ async function openSilentDetail(url, title) {
 async function clearVerification(tabId) {
   verificationTabs.delete(tabId);
   await chrome.alarms.clear(`verification-${tabId}`);
-  if (verificationTabs.size) return;
   const current = await taskState();
+  const remaining = new Set([
+    ...verificationTabs,
+    ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : [])
+  ]);
+  remaining.delete(tabId);
+  verificationTabs.clear();
+  remaining.forEach((id) => verificationTabs.add(id));
+  if (remaining.size) {
+    await saveTask({ verificationTabIds: [...remaining] });
+    return;
+  }
   if (current.status === 'verification_wait') {
-    await saveTask({ status: 'running', verificationUntil: 0, error: '', ...resumedTimingPatch(current) });
+    await saveTask({
+      status: 'running', verificationUntil: 0, verificationMode: '', verificationRiskType: '',
+      verificationTabIds: [], verificationUrl: '', error: '', ...resumedTimingPatch(current)
+    });
   }
   await chrome.action.setBadgeText({ text: '' });
 }
@@ -499,19 +520,26 @@ async function persistPartialResult(result) {
 
 async function stopTask() {
   batchGeneration += 1;
+  const current = await taskState();
   for (const [tabId, pending] of activeDetailTabs) {
     clearTimeout(pending.timer);
     pending.reject(new Error('任务已停止。'));
     chrome.tabs.remove(tabId).catch(() => undefined);
   }
   activeDetailTabs.clear();
-  for (const tabId of verificationTabs) await chrome.alarms.clear(`verification-${tabId}`);
+  const verificationIds = new Set([
+    ...verificationTabs,
+    ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : [])
+  ]);
+  for (const tabId of verificationIds) await chrome.alarms.clear(`verification-${tabId}`);
   verificationTabs.clear();
-  const current = await taskState();
   if (current.listTabId) chrome.tabs.remove(current.listTabId).catch(() => undefined);
   const endedAt = new Date().toISOString();
   const timingPatch = resumedTimingPatch(current, timestamp(endedAt));
-  const finalState = await saveTask({ status: 'stopped', error: '', verificationUntil: 0, ...timingPatch, endedAt });
+  const finalState = await saveTask({
+    status: 'stopped', error: '', verificationUntil: 0, verificationMode: '',
+    verificationRiskType: '', verificationTabIds: [], verificationUrl: '', ...timingPatch, endedAt
+  });
   const timing = taskTiming(finalState);
   await chrome.action.setBadgeText({ text: '' });
   await log('warn', '用户停止任务，请尽快导出 Excel', `运行 ${formatDuration(timing.activeMs)}；暂停 ${formatDuration(timing.pausedMs)}；避免浏览器清理或任务重置后结果失效无法下载`);
@@ -598,21 +626,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === 'HUMAN_VERIFICATION') {
     (async () => {
-      if (sender.tab?.id) verificationTabs.add(sender.tab.id);
+      const tabId = sender.tab?.id;
+      if (tabId) {
+        verificationTabs.add(tabId);
+        const pending = activeDetailTabs.get(tabId);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pending.timer = 0;
+        }
+      }
       const current = await taskState();
-      if (current.status === 'verification_wait') return sendResponse({ verificationUntil: current.verificationUntil });
       const riskType = message.riskType || 'verification';
+      const currentManual = current.verificationMode === 'manual';
+      const detectedManual = riskType !== 'frequency';
+      const manual = currentManual || detectedManual;
       const cooldownMs = 60000;
-      const verificationUntil = Date.now() + cooldownMs;
+      const verificationUntil = manual ? 0 : Date.now() + cooldownMs;
+      const verificationTabIds = [...new Set([
+        ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : []),
+        ...verificationTabs
+      ])];
       await saveTask({
-        status: 'verification_wait', verificationUntil, error: '',
+        status: 'verification_wait', verificationUntil,
+        verificationMode: manual ? 'manual' : 'cooldown', verificationRiskType: riskType,
+        verificationTabIds, verificationUrl: message.url || sender.tab?.url || '', error: '',
         pausedAt: current.pausedAt || new Date().toISOString()
       });
       await chrome.action.setBadgeBackgroundColor({ color: '#b54708' });
-      await chrome.action.setBadgeText({ text: 'WAIT' });
-      if (sender.tab?.id) chrome.alarms.create(`verification-${sender.tab.id}`, { delayInMinutes: cooldownMs / 60000 });
-      await log('warn', '检测到验证或频控页面，等待后重试', `${riskType}；等待 ${Math.round(cooldownMs / 1000)} 秒；${message.url || sender.tab?.url || ''}`);
-      sendResponse({ verificationUntil });
+      await chrome.action.setBadgeText({ text: manual ? '验证' : 'WAIT' });
+      if (tabId && detectedManual) {
+        await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+        if (sender.tab?.windowId) await chrome.windows.update(sender.tab.windowId, { focused: true }).catch(() => undefined);
+      } else if (tabId) {
+        chrome.alarms.create(`verification-${tabId}`, { delayInMinutes: cooldownMs / 60000 });
+      }
+      if (current.status !== 'verification_wait') {
+        await log('warn', manual ? '检测到滑块验证，任务已暂停' : '检测到访问频控，冷却后重试',
+          manual
+            ? `请在已打开的验证页手动拖动滑块，完成后自动继续；${message.url || sender.tab?.url || ''}`
+            : `等待 ${Math.round(cooldownMs / 1000)} 秒；${message.url || sender.tab?.url || ''}`);
+      }
+      sendResponse({ verificationUntil, verificationMode: manual ? 'manual' : 'cooldown' });
+    })().catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.type === 'VERIFICATION_COMPLETED' && sender.tab?.id) {
+    (async () => {
+      const current = await taskState();
+      const storedIds = Array.isArray(current.verificationTabIds) ? current.verificationTabIds : [];
+      const knownTab = verificationTabs.has(sender.tab.id) || storedIds.includes(sender.tab.id)
+        || (current.status === 'verification_wait' && sender.tab.id === current.listTabId);
+      if (!knownTab) return sendResponse({ resumed: false });
+      const pending = activeDetailTabs.get(sender.tab.id);
+      if (pending) armDetailTimeout(sender.tab.id, pending);
+      await clearVerification(sender.tab.id);
+      const latest = await taskState();
+      if (latest.status === 'running') {
+        await log('success', '滑块验证已完成，自动继续采集', sender.tab.url || '');
+      }
+      sendResponse({ resumed: latest.status === 'running' });
     })().catch((error) => sendResponse({ error: error.message }));
     return true;
   }
@@ -671,13 +743,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   const tabId = Number(alarm.name.match(/^verification-(\d+)$/)?.[1]);
   if (!tabId) return;
   const pending = activeDetailTabs.get(tabId);
-  await log('info', '验证等待结束，重新打开原详情页', pending?.url || String(tabId));
-  if (!pending) {
-    await clearVerification(tabId);
-    return;
-  }
-  await saveTask({ status: 'running', error: '' });
-  await chrome.tabs.update(tabId, { url: pending.url, active: false }).catch((error) => {
+  const current = await taskState();
+  if (current.status !== 'verification_wait') return;
+  const targetUrl = pending?.url || current.listUrl;
+  await log('info', '访问频控冷却结束，重新打开原页面', targetUrl || String(tabId));
+  await clearVerification(tabId);
+  if (!targetUrl) return;
+  if (pending) armDetailTimeout(tabId, pending);
+  await chrome.tabs.update(tabId, { url: targetUrl, active: false }).catch((error) => {
     finishDetail(tabId, null, `验证后重新打开详情失败：${error.message}`).catch(() => undefined);
   });
 });
