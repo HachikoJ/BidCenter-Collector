@@ -26,10 +26,6 @@ function cell(ref, value, style = 0) {
   return `<c r="${ref}" t="inlineStr" s="${style}"><is><t${/^\s|\s$/.test(String(value ?? '')) ? ' xml:space="preserve"' : ''}>${text}</t></is></c>`;
 }
 
-function numberCell(ref, value) {
-  return `<c r="${ref}" t="n" s="0"><v>${value}</v></c>`;
-}
-
 export function normalizeBudget(value) {
   const compact = String(value ?? '').trim().replace(/[\s,，￥¥]/g, '');
   if (!compact || /[%％]/.test(compact)) return null;
@@ -40,6 +36,18 @@ export function normalizeBudget(value) {
   const multiplier = /亿(?:元)?/.test(compact) ? 100000000 : /万(?:元)?/.test(compact) ? 10000 : 1;
   const normalized = Math.round((amount * multiplier + Number.EPSILON) * 100) / 100;
   return Number.isSafeInteger(normalized) || normalized < Number.MAX_SAFE_INTEGER ? normalized : null;
+}
+
+function readableAmount(value) {
+  return String(Math.round((value + Number.EPSILON) * 100) / 100);
+}
+
+export function formatBudget(value) {
+  const yuan = normalizeBudget(value);
+  if (yuan === null) return '';
+  if (yuan >= 100000000) return `${readableAmount(yuan / 100000000)}亿元`;
+  if (yuan >= 10000) return `${readableAmount(yuan / 10000)}万元`;
+  return `${readableAmount(yuan)}元`;
 }
 
 function isExternalUrl(value) {
@@ -56,8 +64,7 @@ function worksheet(records) {
       const ref = `${columnName(index)}${rowIndex + 1}`;
       const header = HEADERS[index];
       if (rowIndex && header === '项目预算') {
-        const budget = normalizeBudget(value);
-        return budget === null ? cell(ref, '') : numberCell(ref, budget);
+        return cell(ref, formatBudget(value));
       }
       if (rowIndex && header === '网址' && isExternalUrl(value)) {
         const relationshipId = `rId${relationships.length + 1}`;
