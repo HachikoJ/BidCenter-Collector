@@ -73,6 +73,10 @@ function startStatePolling() {
 }
 
 async function initializeSidepanel() {
+  const version = chrome.runtime.getManifest().version;
+  document.querySelectorAll('[data-app-version]').forEach((element) => {
+    element.textContent = `v${version}`;
+  });
   const stored = await chrome.storage.local.get(ACTIVATION_STORAGE_KEY);
   const isActivated = stored[ACTIVATION_STORAGE_KEY]?.activated === true;
   showActivationView(isActivated);
@@ -397,7 +401,7 @@ function renderKeywordOptions() {
   const selected = $('#keyword').value.trim();
   const placeholder = document.createElement('option');
   placeholder.value = '';
-  placeholder.textContent = '常用词';
+  placeholder.textContent = '选择常用关键词';
   $('#keyword-options').replaceChildren(placeholder, ...keywordOptions.map((keyword) => {
     const option = document.createElement('option');
     option.value = keyword;

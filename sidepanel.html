@@ -13,7 +13,7 @@
           <img class="activation-logo" src="logo.svg" alt="采招网采集助手 logo">
           <div>
             <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-            <strong>采招网采集助手</strong>
+            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.28</span></strong>
           </div>
         </header>
 
@@ -55,7 +55,7 @@
         <img class="brand-logo" src="logo.svg" alt="采招网采集助手 logo">
         <div class="brand-copy">
           <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-          <h1>采招网采集助手</h1>
+          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.28</span></h1>
         </div>
         <span id="status-dot" class="status-dot" aria-label="任务状态" title="任务状态"></span>
       </header>
@@ -77,16 +77,20 @@
       <section class="search-panel">
         <div class="section-heading"><span>采集控制</span><small>浏览器当前会话</small></div>
         <label class="field-label" for="keyword">搜索关键词</label>
-        <div class="keyword-input-row">
-          <input id="keyword" value="智慧交通" maxlength="80" autocomplete="off" placeholder="输入搜索关键词">
-          <select id="keyword-options" aria-label="选择常用关键词">
-            <option value="">常用词</option>
-            <option value="智慧交通" selected>智慧交通</option>
-            <option value="交通基础设施">交通基础设施</option>
-            <option value="自然保护地">自然保护地</option>
-          </select>
-          <button id="add-keyword" class="add-keyword" type="button" aria-label="添加到常用关键词" title="添加到常用关键词">+</button>
-          <button id="manage-keywords" class="manage-keywords" type="button" aria-label="编辑常用关键词" title="编辑常用关键词">编辑</button>
+        <div class="keyword-controls">
+          <div class="keyword-control-row">
+            <input id="keyword" value="智慧交通" maxlength="80" autocomplete="off" placeholder="输入搜索关键词">
+            <button id="add-keyword" class="keyword-icon-button add-keyword" type="button" aria-label="添加到常用关键词" title="添加到常用关键词">+</button>
+          </div>
+          <div class="keyword-control-row">
+            <select id="keyword-options" aria-label="选择常用关键词">
+              <option value="">选择常用关键词</option>
+              <option value="智慧交通" selected>智慧交通</option>
+              <option value="交通基础设施">交通基础设施</option>
+              <option value="自然保护地">自然保护地</option>
+            </select>
+            <button id="manage-keywords" class="keyword-icon-button manage-keywords" type="button" aria-label="编辑常用关键词" title="编辑常用关键词"><span aria-hidden="true">✎</span></button>
+          </div>
         </div>
         <div class="time-filter" aria-label="检索时间">
           <span class="time-filter-label">检索时间</span>
@@ -204,6 +208,27 @@
           <div class="debug-empty">暂无插件运行错误</div>
         </div>
       </section>
+
+      <details class="version-history">
+        <summary><span>版本历史</span><small>v1.9.28 当前版本</small></summary>
+        <div class="version-history-list">
+          <article>
+            <strong>v1.9.28</strong>
+            <ul>
+              <li>优化关键词输入和常用词选择布局，新增、编辑操作统一为图标按钮。</li>
+              <li>顶部显示当前版本号，底部增加精简的功能版本记录。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v1.9.27</strong>
+            <ul>
+              <li>常用关键词支持新增、编辑、删除和本机持久化。</li>
+              <li>增加任务预计总耗时、剩余时间、实际速度修正和跨日提醒。</li>
+              <li>激活页支持粘贴激活码，并优化二维码、永久免费及免责声明展示。</li>
+            </ul>
+          </article>
+        </div>
+      </details>
 
       <footer class="footer-row">
         <span id="last-action">尚未开始任务</span>
