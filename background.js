@@ -1,4 +1,4 @@
-const DETAIL_TIMEOUT = 180000;
+const DETAIL_TIMEOUT = 45000;
 const DEFAULT_SETTINGS = {
   intervalMs: 3000,
   concurrency: 3,
@@ -367,7 +367,7 @@ function waitForDetail(tabId, url, title) {
       activeDetailTabs.delete(tabId);
       await clearVerification(tabId);
       chrome.tabs.remove(tabId).catch(() => undefined);
-      reject(new Error('详情页在 3 分钟内未出现有效正文。'));
+      reject(new Error('详情页在 45 秒内未完成采集。'));
     }, DETAIL_TIMEOUT);
     activeDetailTabs.set(tabId, { resolve, reject, timer, url, title });
   });

@@ -39,6 +39,8 @@ const ADVANCED_FILTER_FIELDS = [
 let taskRunning = false;
 const RESULT_LOAD_TIMEOUT = 45000;
 const RESULT_STABLE_FOR = 800;
+const DETAIL_LOAD_TIMEOUT = 30000;
+const DETAIL_STABLE_FOR = 3000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (element) => element?.innerText?.replace(/\s+/g, ' ').trim() || '';
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -174,6 +176,12 @@ function externalDetailTarget(root = detailRoot()) {
   return absoluteUrl(link.getAttribute('href'));
 }
 
+function detailMediaContent(root = detailRoot()) {
+  return Boolean(root?.querySelector(
+    'a[href^="javascript:bid_showfile"], img[src^="javascript:bid_showfile"]'
+  ));
+}
+
 function detailText() {
   const candidates = ['#gonggaozhengwen', '.gonggaozhengwen', '#news_contet_detail', '.zbzw_content', '.article-content', '.detail-content', '.news-content'];
   for (const selector of candidates) {
@@ -181,7 +189,8 @@ function detailText() {
     if (value.length > 30) return value;
   }
   const externalTarget = externalDetailTarget();
-  return externalTarget ? `详情请点击查看：${externalTarget}` : '';
+  if (externalTarget) return `详情请点击查看：${externalTarget}`;
+  return text(detailRoot());
 }
 
 function normalizedLabel(value) {
@@ -292,28 +301,53 @@ function detailTitle() {
   return title || clean(document.title).replace(/[-_｜|].*$/, '').trim();
 }
 
-function detailReady() {
+function visibleDetailLoader() {
+  return [...document.querySelectorAll('.el-loading-mask, .el-icon-loading, [class*="loading"]')]
+    .some((element) => {
+      if (String(element.className || '').includes('loading-fade-leave')) return false;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden'
+        && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+    });
+}
+
+function detailLoadState() {
   const title = text(document.querySelector('.title-box h2, h1.item-tit, h1, .article-title, .news-title, .detail-title'));
   const root = detailRoot();
   const body = text(root);
-  return title.length > 3 && (body.length > 30 || Boolean(externalDetailTarget(root)));
+  if (title.length <= 3 || !root) return { status: 'loading', signature: '' };
+  if (body.length > 30 || externalDetailTarget(root) || detailMediaContent(root)) {
+    return { status: 'ready', signature: '' };
+  }
+  if (document.readyState !== 'complete' || visibleDetailLoader()) {
+    return { status: 'loading', signature: '' };
+  }
+  return {
+    status: body ? 'short' : 'empty',
+    signature: `${title}\u0000${root.innerHTML}`
+  };
 }
 
-function waitForDetailReady(timeout = 85000) {
-  if (detailReady()) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const observer = new MutationObserver(() => {
-      if (!detailReady()) return;
-      observer.disconnect();
-      clearTimeout(timer);
-      resolve(true);
-    });
-    const timer = setTimeout(() => {
-      observer.disconnect();
-      resolve(false);
-    }, timeout);
-    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-  });
+async function waitForDetailReady(timeout = DETAIL_LOAD_TIMEOUT) {
+  const startedAt = Date.now();
+  let stableSignature = '';
+  let stableSince = 0;
+  while (Date.now() - startedAt < timeout) {
+    const state = detailLoadState();
+    if (state.status === 'ready') return true;
+    if (!state.signature) {
+      stableSignature = '';
+      stableSince = 0;
+    } else if (state.signature !== stableSignature) {
+      stableSignature = state.signature;
+      stableSince = Date.now();
+    } else if (Date.now() - stableSince >= DETAIL_STABLE_FOR) {
+      return state.status === 'short';
+    }
+    await sleep(250);
+  }
+  return false;
 }
 
 function scrapeDetail() {
@@ -953,9 +987,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return;
   }
   if (/#\/des\/customDesSearch\/\d+/i.test(location.hash)) {
-    const ready = await waitForDetailReady(170000);
+    const ready = await waitForDetailReady();
     if (ready) await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_READY', record: scrapeDetail() });
-    else await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_FAILED', error: '详情页未出现标题和公告正文。' });
+    else await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_FAILED', error: '详情页未出现可采集内容。' });
     return;
   }
   const state = await taskState();
