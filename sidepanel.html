@@ -13,7 +13,7 @@
           <img class="activation-logo" src="logo.svg" alt="采招网采集助手 logo">
           <div>
             <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.29</span></strong>
+            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.30</span></strong>
           </div>
         </header>
 
@@ -55,7 +55,7 @@
         <img class="brand-logo" src="logo.svg" alt="采招网采集助手 logo">
         <div class="brand-copy">
           <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.29</span></h1>
+          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.30</span></h1>
         </div>
         <span id="status-dot" class="status-dot" aria-label="任务状态" title="任务状态"></span>
       </header>
@@ -204,8 +204,16 @@
       </section>
 
       <details class="version-history">
-        <summary><span>版本历史</span><small>v1.9.29 当前版本</small></summary>
+        <summary><span>版本历史</span><small>v1.9.30 当前版本</small></summary>
         <div class="version-history-list">
+          <article>
+            <strong>v1.9.30</strong>
+            <ul>
+              <li>并发通道每次启动详情时随机错峰 0.1-3 秒，避免同一时刻集中打开。</li>
+              <li>详情基础间隔每条随机偏移 -2 至 +2 秒，并在日志中记录本条实际间隔。</li>
+              <li>预计耗时同步纳入随机错峰后的执行节奏。</li>
+            </ul>
+          </article>
           <article>
             <strong>v1.9.29</strong>
             <ul>
@@ -213,8 +221,7 @@
               <li>短正文稳定后正常采集，空正文快速结束，单条详情不再长期占用并发槽。</li>
               <li>信息详情保留短正文或外部原文链接，便于后续打开和核对。</li>
               <li>检测到官网滑块验证时暂停任务，人工完成后自动续采，不再定时刷新验证页。</li>
-              <li>详情基础间隔默认 5000ms，每条随机偏移 -2 至 +2 秒；暂停后修改会在继续任务时立即生效。</li>
-              <li>并发通道启动详情时随机错峰 0.1-3 秒，避免同一时刻集中打开。</li>
+              <li>详情间隔默认调整为 5000ms，暂停后修改会在继续任务时立即生效。</li>
             </ul>
           </article>
           <article>
