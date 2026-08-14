@@ -4,6 +4,7 @@ const $ = (selector) => document.querySelector(selector);
 const controls = ['start', 'pause', 'resume', 'export', 'stop', 'clear'].map((id) => $(`#${id}`));
 const ACTIVATION_CODE = '18682408521';
 const ACTIVATION_STORAGE_KEY = 'collectorActivation';
+const INTERVAL_DEFAULT_MIGRATION_KEY = 'intervalDefault5000Migrated';
 const DEFAULT_KEYWORDS = ['智慧交通', '交通基础设施', '自然保护地'];
 const ALL_INFORMATION_TYPES = [
   '招标公告', '招标变更', '中标结果', '采购信息', '招标预告', '审批公示',
@@ -36,7 +37,7 @@ let latestOfficialFilterOptions = OFFICIAL_ADVANCED_FILTER_FALLBACKS;
 let keywordOptions = [...DEFAULT_KEYWORDS];
 let draftWords = { exclude: [], related: [] };
 let settings = {
-  intervalMs: 3000, concurrency: 3,
+  intervalMs: 5000, concurrency: 3,
   informationTypes: [...DEFAULT_INFORMATION_TYPES],
   timeFilterMode: 'previous_calendar_month',
   timeRangeStart: INITIAL_TIME_RANGE.start, timeRangeEnd: INITIAL_TIME_RANGE.end,
@@ -154,7 +155,7 @@ function taskEstimate(state = {}, now = Date.now()) {
     currentPageRemaining + futurePages * pageSize + remainingTypes * totalPages * pageSize);
   const completedItems = completedRecordCount(state);
   const timing = taskTiming(state, now);
-  const intervalMs = Math.max(200, Number(state.settings?.intervalMs || settings.intervalMs) || 3000);
+  const intervalMs = Math.max(200, Number(state.settings?.intervalMs || settings.intervalMs) || 5000);
   const concurrency = Math.max(1, Number(state.settings?.concurrency || settings.concurrency) || 3);
   const configuredPerItemMs = Math.max(3000, intervalMs) / concurrency;
   const observedPerItemMs = completedItems >= Math.max(6, concurrency * 2) && timing.activeMs > 0
@@ -649,8 +650,22 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
 }
 
 async function getState() {
-  const stored = await chrome.storage.local.get(['task', 'taskLogs', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions']);
-  const { task = {}, taskLogs = [], collectorSettings = {}, systemErrors = [], dailyQuotaUsage = {}, officialAdvancedFilterOptions = {} } = stored;
+  const stored = await chrome.storage.local.get(['task', 'taskLogs', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', INTERVAL_DEFAULT_MIGRATION_KEY]);
+  let task = stored.task || {};
+  let collectorSettings = stored.collectorSettings || {};
+  const { taskLogs = [], systemErrors = [], dailyQuotaUsage = {}, officialAdvancedFilterOptions = {} } = stored;
+  if (!stored[INTERVAL_DEFAULT_MIGRATION_KEY]) {
+    const migration = { [INTERVAL_DEFAULT_MIGRATION_KEY]: true };
+    if (Number(collectorSettings.intervalMs) === 3000) {
+      collectorSettings = { ...collectorSettings, intervalMs: 5000 };
+      migration.collectorSettings = collectorSettings;
+    }
+    if (Number(task.settings?.intervalMs) === 3000) {
+      task = { ...task, settings: { ...task.settings, intervalMs: 5000 } };
+      migration.task = task;
+    }
+    await chrome.storage.local.set(migration);
+  }
   const storedKeywordOptions = stored.keywordOptions;
   const normalizedKeywordOptions = normalizeKeywordOptions(Array.isArray(storedKeywordOptions) ? storedKeywordOptions : DEFAULT_KEYWORDS);
   syncKeywordOptions(normalizedKeywordOptions);
@@ -685,10 +700,16 @@ $('#pause').addEventListener('click', async () => {
   await getState();
 });
 $('#resume').addEventListener('click', async () => {
-  const response = await chrome.runtime.sendMessage({ type: 'RESUME_SILENT' });
+  const intervalMs = Math.min(30000, Math.max(200, Number($('#interval').value) || 5000));
+  settings = { ...settings, intervalMs };
+  await chrome.storage.local.set({ collectorSettings: settings });
+  const response = await chrome.runtime.sendMessage({ type: 'RESUME_SILENT', intervalMs });
   if (response?.loginRequired) return getState();
   if (response?.error) await reportSidepanelError(new Error(response.error), '继续任务', false);
-  else if (response?.dailyLimit) await getState();
+  else {
+    settingsDirty = false;
+    await getState();
+  }
 });
 function readSettings() {
   const timeFilterMode = selectedTimeMode();
@@ -700,7 +721,7 @@ function readSettings() {
   }
   if (timeRangeStart > timeRangeEnd) throw new Error('开始日期不能晚于结束日期。');
   const next = {
-    intervalMs: Math.min(30000, Math.max(200, Number($('#interval').value) || 3000)),
+    intervalMs: Math.min(30000, Math.max(200, Number($('#interval').value) || 5000)),
     concurrency: Math.min(6, Math.max(1, Number($('#concurrency').value) || 3)),
     informationTypes: selectedInformationTypes(),
     timeFilterMode, timeRangeStart, timeRangeEnd,
@@ -715,7 +736,7 @@ function readSettings() {
 
 function adjustInterval(delta) {
   const input = $('#interval');
-  const current = Number(input.value) || 3000;
+  const current = Number(input.value) || 5000;
   input.value = Math.min(30000, Math.max(200, current + delta));
   settingsDirty = true;
 }

@@ -140,7 +140,7 @@
             <span class="stepper-wrap">
               <span class="stepper">
                 <button id="interval-decrease" class="stepper-button" type="button" aria-label="减少详情间隔" title="减少 100 毫秒">−</button>
-                <input id="interval" type="number" min="200" max="30000" step="100" value="3000" inputmode="numeric" aria-label="详情间隔（毫秒）">
+                <input id="interval" type="number" min="200" max="30000" step="100" value="5000" inputmode="numeric" aria-label="详情间隔（毫秒）">
                 <button id="interval-increase" class="stepper-button" type="button" aria-label="增加详情间隔" title="增加 100 毫秒">+</button>
               </span>
               <small>ms</small>
@@ -213,6 +213,7 @@
               <li>短正文稳定后正常采集，空正文快速结束，单条详情不再长期占用并发槽。</li>
               <li>信息详情保留短正文或外部原文链接，便于后续打开和核对。</li>
               <li>检测到官网滑块验证时暂停任务，人工完成后自动续采，不再定时刷新验证页。</li>
+              <li>详情间隔默认调整为 5000ms，暂停后修改间隔会在继续任务时立即生效。</li>
             </ul>
           </article>
           <article>

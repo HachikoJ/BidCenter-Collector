@@ -1,6 +1,6 @@
 const DETAIL_TIMEOUT = 45000;
 const DEFAULT_SETTINGS = {
-  intervalMs: 3000,
+  intervalMs: 5000,
   concurrency: 3,
   pageSize: 40
 };
@@ -454,10 +454,10 @@ async function runDetailBatch(entries) {
   await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，间隔 ${settings.intervalMs}ms`);
   const results = new Array(entries.length);
   let nextIndex = 0;
-  const workerNextOpenAt = new Map();
+  const workerLastOpenAt = new Map();
   async function worker() {
-    const workerId = [...workerNextOpenAt.keys()].length + 1;
-    workerNextOpenAt.set(workerId, 0);
+    const workerId = [...workerLastOpenAt.keys()].length + 1;
+    workerLastOpenAt.set(workerId, 0);
     while (nextIndex < entries.length && generation === batchGeneration) {
       let state = await taskState();
       while (state.status === 'verification_wait' && generation === batchGeneration) {
@@ -471,12 +471,21 @@ async function runDetailBatch(entries) {
       nextIndex += 1;
       const entry = entries[index];
       try {
+        const intervalMs = normalizeSettings(state.settings).intervalMs;
         const now = Date.now();
-        const scheduledAt = Math.max(now, workerNextOpenAt.get(workerId) || 0);
-        workerNextOpenAt.set(workerId, scheduledAt + settings.intervalMs);
+        const lastOpenAt = workerLastOpenAt.get(workerId) || 0;
+        const scheduledAt = Math.max(now, lastOpenAt + intervalMs);
         if (scheduledAt > now) await sleep(scheduledAt - now);
         state = await taskState();
         if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
+        const resumedIntervalMs = normalizeSettings(state.settings).intervalMs;
+        const resumedScheduledAt = lastOpenAt + resumedIntervalMs;
+        if (resumedScheduledAt > Date.now()) {
+          await sleep(resumedScheduledAt - Date.now());
+          state = await taskState();
+          if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
+        }
+        workerLastOpenAt.set(workerId, Date.now());
         const quota = await reserveDailyQuotaSlot();
         if (!quota.reserved) {
           await markDailyLimitReached(quota.usage);
@@ -545,7 +554,7 @@ async function stopTask() {
   await log('warn', '用户停止任务，请尽快导出 Excel', `运行 ${formatDuration(timing.activeMs)}；暂停 ${formatDuration(timing.pausedMs)}；避免浏览器清理或任务重置后结果失效无法下载`);
 }
 
-async function resumeTask() {
+async function resumeTask(requestedIntervalMs) {
   const current = await taskState();
   await requireMemberLogin({ preferredTabId: current.listTabId });
   const quota = await getDailyQuotaUsage();
@@ -556,9 +565,12 @@ async function resumeTask() {
   let tab = current.listTabId ? await chrome.tabs.get(current.listTabId).catch(() => null) : null;
   if (!tab && current.listUrl) tab = await chrome.tabs.create({ url: current.listUrl, active: false });
   if (!tab) throw new Error('没有可继续的后台结果页，请重新开始任务。');
-  await saveTask({ status: 'running', listTabId: tab.id, error: '', ...resumedTimingPatch(current) });
+  const intervalMs = Math.min(30000, Math.max(200,
+    Number(requestedIntervalMs) || Number(current.settings?.intervalMs) || DEFAULT_SETTINGS.intervalMs));
+  const taskSettings = { ...(current.settings || {}), intervalMs };
+  await saveTask({ status: 'running', listTabId: tab.id, settings: taskSettings, error: '', ...resumedTimingPatch(current) });
   await chrome.action.setBadgeText({ text: '' });
-  await log('info', '继续后台采集', `会员登录已校验；${current.listUrl || tab.url || ''}`);
+  await log('info', '继续后台采集', `会员登录已校验；详情间隔 ${intervalMs}ms；${current.listUrl || tab.url || ''}`);
   await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' }).catch(async () => {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
     await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' });
@@ -698,7 +710,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === 'RESUME_SILENT') {
     requireActivation()
-      .then(() => resumeTask())
+      .then(() => resumeTask(message.intervalMs))
       .then((result) => sendResponse({ ok: result.resumed !== false, ...result }))
       .catch(async (error) => {
         if (error.code === 'LOGIN_REQUIRED') {
@@ -729,7 +741,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await sleep(50);
       await chrome.storage.local.remove([
         'task', 'taskLogs', 'collectorSettings', 'systemErrors',
-        'officialAdvancedFilterOptions', 'keywordOptions', ACTIVATION_STORAGE_KEY
+        'officialAdvancedFilterOptions', 'keywordOptions', 'intervalDefault5000Migrated', ACTIVATION_STORAGE_KEY
       ]);
       await chrome.action.setBadgeText({ text: '' });
       sendResponse({ ok: true });
