@@ -168,13 +168,20 @@ function detailRoot() {
   return document.querySelector('#gonggaozhengwen, .gonggaozhengwen, #news_contet_detail, .zbzw_content, .article-content, .detail-content, .news-content');
 }
 
+function externalDetailTarget(root = detailRoot()) {
+  const link = root?.querySelector('a.external-link[href], a[data="caijiauto"][href]');
+  if (!link || !/详情请点击查看/.test(text(link))) return '';
+  return absoluteUrl(link.getAttribute('href'));
+}
+
 function detailText() {
   const candidates = ['#gonggaozhengwen', '.gonggaozhengwen', '#news_contet_detail', '.zbzw_content', '.article-content', '.detail-content', '.news-content'];
   for (const selector of candidates) {
     const value = text(document.querySelector(selector));
     if (value.length > 30) return value;
   }
-  return '';
+  const externalTarget = externalDetailTarget();
+  return externalTarget ? `详情请点击查看：${externalTarget}` : '';
 }
 
 function normalizedLabel(value) {
@@ -287,8 +294,9 @@ function detailTitle() {
 
 function detailReady() {
   const title = text(document.querySelector('.title-box h2, h1.item-tit, h1, .article-title, .news-title, .detail-title'));
-  const body = text(detailRoot());
-  return title.length > 3 && body.length > 30;
+  const root = detailRoot();
+  const body = text(root);
+  return title.length > 3 && (body.length > 30 || Boolean(externalDetailTarget(root)));
 }
 
 function waitForDetailReady(timeout = 85000) {
