@@ -147,7 +147,7 @@
             </span>
           </label>
           <label class="setting-field"><span>并发数</span>
-            <span id="concurrency-control" class="segmented-control" role="group" aria-label="并发数">
+            <span id="concurrency-control" class="segmented-control" role="group" aria-label="并发数" title="并发通道每次启动详情时随机错峰 0.1-3 秒">
               <button type="button" data-concurrency="1">1</button>
               <button type="button" data-concurrency="2">2</button>
               <button type="button" data-concurrency="3" class="selected">3</button>
@@ -214,6 +214,7 @@
               <li>信息详情保留短正文或外部原文链接，便于后续打开和核对。</li>
               <li>检测到官网滑块验证时暂停任务，人工完成后自动续采，不再定时刷新验证页。</li>
               <li>详情间隔默认调整为 5000ms，暂停后修改间隔会在继续任务时立即生效。</li>
+              <li>并发通道启动详情时随机错峰 0.1-3 秒，避免同一时刻集中打开。</li>
             </ul>
           </article>
           <article>

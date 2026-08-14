@@ -157,7 +157,7 @@ function taskEstimate(state = {}, now = Date.now()) {
   const timing = taskTiming(state, now);
   const intervalMs = Math.max(200, Number(state.settings?.intervalMs || settings.intervalMs) || 5000);
   const concurrency = Math.max(1, Number(state.settings?.concurrency || settings.concurrency) || 3);
-  const configuredPerItemMs = Math.max(3000, intervalMs) / concurrency;
+  const configuredPerItemMs = Math.max(intervalMs / concurrency, 1550);
   const observedPerItemMs = completedItems >= Math.max(6, concurrency * 2) && timing.activeMs > 0
     ? timing.activeMs / completedItems : 0;
   const perItemMs = Math.min(180000, Math.max(configuredPerItemMs, observedPerItemMs));

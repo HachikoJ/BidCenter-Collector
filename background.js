@@ -1,4 +1,6 @@
 const DETAIL_TIMEOUT = 45000;
+const DETAIL_STAGGER_MIN_MS = 100;
+const DETAIL_STAGGER_MAX_MS = 3000;
 const DEFAULT_SETTINGS = {
   intervalMs: 5000,
   concurrency: 3,
@@ -23,6 +25,9 @@ let quotaQueue = Promise.resolve();
 let dailyLimitQueue = Promise.resolve();
 let batchGeneration = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const randomDetailStaggerMs = () => Math.floor(
+  Math.random() * (DETAIL_STAGGER_MAX_MS - DETAIL_STAGGER_MIN_MS + 1)
+) + DETAIL_STAGGER_MIN_MS;
 
 async function requireActivation() {
   const stored = await chrome.storage.local.get(ACTIVATION_STORAGE_KEY);
@@ -390,8 +395,7 @@ async function openSilentDetail(url, title) {
   }
   log('info', '后台打开详情页', `${title || url}；活动详情 ${activeDetailTabs.size} 个；使用浏览器已登录会话${createProperties.openerTabId ? '，关联结果页' : ''}`);
   const tab = await chrome.tabs.create(createProperties);
-  const result = waitForDetail(tab.id, url, title);
-  return result;
+  return { openedAt: Date.now(), result: waitForDetail(tab.id, url, title) };
 }
 
 async function clearVerification(tabId) {
@@ -451,10 +455,45 @@ async function runDetailBatch(entries) {
   await requireMemberLogin({ preferredTabId: batchTask.listTabId, allowProbe: false });
   const settings = normalizeSettings(batchTask.settings);
   await saveTask({ batchTotal: entries.length, batchDone: 0, batchFailed: 0 });
-  await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，间隔 ${settings.intervalMs}ms`);
+  await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，间隔 ${settings.intervalMs}ms，每次启动随机错峰 0.1-3 秒`);
   const results = new Array(entries.length);
   let nextIndex = 0;
   const workerLastOpenAt = new Map();
+  let staggerQueue = Promise.resolve();
+
+  async function openStaggeredDetail(entry, workerId) {
+    const previousLaunch = staggerQueue;
+    let releaseLaunch;
+    staggerQueue = new Promise((resolve) => { releaseLaunch = resolve; });
+    await previousLaunch;
+    try {
+      let state = await taskState();
+      while (state.status === 'verification_wait' && generation === batchGeneration) {
+        await sleep(1000);
+        state = await taskState();
+      }
+      if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return null;
+      const staggerMs = randomDetailStaggerMs();
+      await sleep(staggerMs);
+      state = await taskState();
+      while (state.status === 'verification_wait' && generation === batchGeneration) {
+        await sleep(1000);
+        state = await taskState();
+      }
+      if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return null;
+      const quota = await reserveDailyQuotaSlot();
+      if (!quota.reserved) {
+        await markDailyLimitReached(quota.usage);
+        return null;
+      }
+      await log('info', `并发通道 ${workerId} 错峰启动详情`, `随机等待 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
+      const opened = await openSilentDetail(entry.url, entry.title);
+      return opened;
+    } finally {
+      releaseLaunch();
+    }
+  }
+
   async function worker() {
     const workerId = [...workerLastOpenAt.keys()].length + 1;
     workerLastOpenAt.set(workerId, 0);
@@ -485,14 +524,10 @@ async function runDetailBatch(entries) {
           state = await taskState();
           if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
         }
-        workerLastOpenAt.set(workerId, Date.now());
-        const quota = await reserveDailyQuotaSlot();
-        if (!quota.reserved) {
-          await markDailyLimitReached(quota.usage);
-          return;
-        }
-        await log('info', `并发通道 ${workerId} 启动详情`, `活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
-        const record = await openSilentDetail(entry.url, entry.title);
+        const opened = await openStaggeredDetail(entry, workerId);
+        if (!opened) return;
+        workerLastOpenAt.set(workerId, opened.openedAt);
+        const record = await opened.result;
         await updateBatchProgress(false);
         results[index] = { url: entry.url, summary: entry.summary, record };
         await persistPartialResult(results[index]);
