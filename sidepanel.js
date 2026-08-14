@@ -615,7 +615,6 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
     $('#keyword').value = state.keyword;
     syncKeywordControls();
   }
-  $('#last-action').textContent = state.lastTitle ? `最近：${state.lastTitle}` : state.updatedAt ? `更新于 ${formatTime(state.updatedAt)}` : '尚未开始任务';
   if (!settingsDirty) {
     const currentSettings = { ...settings, ...(state.settings || {}) };
     $('#interval').value = currentSettings.intervalMs;
