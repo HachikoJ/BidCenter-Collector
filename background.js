@@ -326,6 +326,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     timeFilterMode: settings.timeFilterMode, timeRangeStart: timeRange.start, timeRangeEnd: timeRange.end,
     timeFilterApplied: false, listUrl: url, awaitingSignature: '', error: '',
     verificationUntil: 0, verificationMode: '', verificationRiskType: '', verificationTabIds: [], verificationUrl: '',
+    verificationResumeStatus: '',
     advancedFilters: settings.advancedFilters, excludeWords: settings.excludeWords,
     relatedWords: settings.relatedWords, advancedFiltersApplied: false,
     startedAt: new Date().toISOString(), pausedAt: '', totalPausedMs: 0, endedAt: '',
@@ -392,9 +393,12 @@ function waitForDetail(tabId, url, title) {
   });
 }
 
-async function openSilentDetail(url, title) {
+async function openSilentDetail(url, title, expectedGeneration) {
   const { task = {} } = await chrome.storage.local.get('task');
+  if (expectedGeneration !== batchGeneration || !['searching', 'filtering', 'running'].includes(task.status)) return null;
   const listTab = task.listTabId ? await chrome.tabs.get(task.listTabId).catch(() => null) : null;
+  const latest = await taskState();
+  if (expectedGeneration !== batchGeneration || !['searching', 'filtering', 'running'].includes(latest.status)) return null;
   const createProperties = { url, active: false };
   if (listTab && /(^|\.)bidcenter\.com\.cn$/i.test(new URL(listTab.url || '').hostname)) {
     createProperties.openerTabId = listTab.id;
@@ -420,9 +424,12 @@ async function clearVerification(tabId) {
     return;
   }
   if (current.status === 'verification_wait') {
+    const resumeStatus = ['paused', 'daily_limit'].includes(current.verificationResumeStatus)
+      ? current.verificationResumeStatus : 'running';
+    const timingPatch = resumeStatus === 'running' ? resumedTimingPatch(current) : {};
     await saveTask({
-      status: 'running', verificationUntil: 0, verificationMode: '', verificationRiskType: '',
-      verificationTabIds: [], verificationUrl: '', error: '', ...resumedTimingPatch(current)
+      status: resumeStatus, verificationUntil: 0, verificationMode: '', verificationRiskType: '',
+      verificationTabIds: [], verificationUrl: '', verificationResumeStatus: '', error: '', ...timingPatch
     });
   }
   await chrome.action.setBadgeText({ text: '' });
@@ -444,8 +451,9 @@ async function finishDetail(tabId, record, error) {
   pending.resolve(record);
 }
 
-function updateBatchProgress(failed) {
+function updateBatchProgress(failed, expectedGeneration) {
   progressQueue = progressQueue.then(async () => {
+    if (expectedGeneration !== batchGeneration) return;
     const current = await taskState();
     await saveTask({
       batchDone: (current.batchDone || 0) + 1,
@@ -497,7 +505,7 @@ async function runDetailBatch(entries) {
         ? `基础间隔 ${intervalTiming.baseMs}ms，随机偏移 ${jitterLabel}ms，实际 ${intervalTiming.actualMs}ms；`
         : '本通道首条无需前序间隔；';
       await log('info', `并发通道 ${workerId} 错峰启动详情`, `${intervalLabel}启动错峰 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
-      const opened = await openSilentDetail(entry.url, entry.title);
+      const opened = await openSilentDetail(entry.url, entry.title, generation);
       return opened;
     } finally {
       releaseLaunch();
@@ -546,13 +554,15 @@ async function runDetailBatch(entries) {
         if (!opened) return;
         workerLastOpenAt.set(workerId, opened.openedAt);
         const record = await opened.result;
-        await updateBatchProgress(false);
+        if (generation !== batchGeneration) return;
+        await updateBatchProgress(false, generation);
         results[index] = { url: entry.url, summary: entry.summary, record };
-        await persistPartialResult(results[index]);
+        await persistPartialResult(results[index], generation);
       } catch (error) {
-        await updateBatchProgress(true);
+        if (generation !== batchGeneration) return;
+        await updateBatchProgress(true, generation);
         results[index] = { url: entry.url, summary: entry.summary, error: error.message || '详情采集失败。' };
-        await persistPartialResult(results[index]);
+        await persistPartialResult(results[index], generation);
       }
     }
   }
@@ -567,8 +577,9 @@ async function runDetailBatch(entries) {
   return completedResults;
 }
 
-async function persistPartialResult(result) {
+async function persistPartialResult(result, expectedGeneration) {
   partialQueue = partialQueue.then(async () => {
+    if (expectedGeneration !== batchGeneration) return;
     const current = await taskState();
     const partial = [...(current.partialRecords || [])];
     const key = result.url || result.record?.网址;
@@ -600,7 +611,8 @@ async function stopTask() {
   const timingPatch = resumedTimingPatch(current, timestamp(endedAt));
   const finalState = await saveTask({
     status: 'stopped', error: '', verificationUntil: 0, verificationMode: '',
-    verificationRiskType: '', verificationTabIds: [], verificationUrl: '', ...timingPatch, endedAt
+    verificationRiskType: '', verificationTabIds: [], verificationUrl: '', verificationResumeStatus: '',
+    ...timingPatch, endedAt
   });
   const timing = taskTiming(finalState);
   await chrome.action.setBadgeText({ text: '' });
@@ -711,10 +723,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : []),
         ...verificationTabs
       ])];
+      const verificationResumeStatus = current.status === 'verification_wait'
+        ? current.verificationResumeStatus
+        : ['paused', 'daily_limit'].includes(current.status) ? current.status : 'running';
       await saveTask({
         status: 'verification_wait', verificationUntil,
         verificationMode: manual ? 'manual' : 'cooldown', verificationRiskType: riskType,
         verificationTabIds, verificationUrl: message.url || sender.tab?.url || '', error: '',
+        verificationResumeStatus,
         pausedAt: current.pausedAt || new Date().toISOString()
       });
       await chrome.action.setBadgeBackgroundColor({ color: '#b54708' });
@@ -761,6 +777,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     stopTask().then(() => sendResponse({ ok: true }));
     return true;
   }
+  if (message.type === 'CLEAR_TASK') {
+    (async () => {
+      await stopTask();
+      await Promise.allSettled([progressQueue, partialQueue]);
+      await chrome.storage.local.remove(['task', 'taskLogs']);
+      await chrome.action.setBadgeText({ text: '' });
+      sendResponse({ ok: true });
+    })().catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
   if (message.type === 'RESUME_SILENT') {
     requireActivation()
       .then(() => resumeTask(message.intervalMs))
@@ -788,10 +814,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })().catch(() => undefined);
     return undefined;
   }
-  if (message.type === 'RESET_FACTORY') {
+  if (message.type === 'RESET_SETTINGS') {
     (async () => {
       await stopTask();
-      await sleep(50);
+      await Promise.allSettled([progressQueue, partialQueue]);
       await chrome.storage.local.remove([
         'task', 'taskLogs', 'collectorSettings', 'systemErrors',
         'officialAdvancedFilterOptions', 'keywordOptions', 'intervalDefault5000Migrated', ACTIVATION_STORAGE_KEY

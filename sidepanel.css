@@ -199,8 +199,8 @@ input:focus, select:focus { border-color: #71aaa6; outline: none; box-shadow: 0 
 .utility-button { padding: 0 7px; color: var(--text-2); }
 .clear-task { color: var(--danger); }
 .clear-task:hover:not(:disabled) { border-color: #efb7b3; background: var(--danger-soft); }
-.factory-reset { color: #9a5b13; }
-.factory-reset:hover:not(:disabled) { border-color: #e6c58f; background: #fff8e8; }
+.reset-settings { color: #9a5b13; }
+.reset-settings:hover:not(:disabled) { border-color: #e6c58f; background: #fff8e8; }
 .console-panel { overflow: hidden; border-color: #1e293b; background: #111c2d; }
 .panel-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 6px; height: 35px; padding: 5px 8px 5px 10px; border-bottom: 1px solid #263449; color: #e2e8f0; }
 .panel-heading > div:first-child { min-width: 0; }

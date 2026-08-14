@@ -766,15 +766,19 @@ $('#export').addEventListener('click', async () => {
   if (records.length) downloadWorkbook(records);
 });
 $('#clear').addEventListener('click', async () => {
-  await chrome.storage.local.remove(['task', 'taskLogs']);
+  const response = await chrome.runtime.sendMessage({ type: 'CLEAR_TASK' });
+  if (response?.error) {
+    await reportSidepanelError(new Error(response.error), '清空任务', false);
+    return;
+  }
   render({ status: 'idle' }, [], latestSystemErrors, latestQuota);
 });
-$('#factory-reset').addEventListener('click', async () => {
-  const confirmed = confirm('恢复出厂设置将清除激活状态、任务、采集结果、日志、自定义关键词和所有用户设置。\n\n今日访问计数会保留，以防超过平台每日访问上限。确定继续吗？');
+$('#reset-settings').addEventListener('click', async () => {
+  const confirmed = confirm('恢复设置将清除激活状态、任务、采集结果、日志、自定义关键词和所有用户设置。\n\n今日访问计数会保留，以防超过平台每日访问上限。确定继续吗？');
   if (!confirmed) return;
-  const response = await chrome.runtime.sendMessage({ type: 'RESET_FACTORY' });
+  const response = await chrome.runtime.sendMessage({ type: 'RESET_SETTINGS' });
   if (response?.error) {
-    await reportSidepanelError(new Error(response.error), '恢复出厂设置', false);
+    await reportSidepanelError(new Error(response.error), '恢复设置', false);
     return;
   }
   location.reload();
