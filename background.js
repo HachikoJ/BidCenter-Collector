@@ -357,7 +357,13 @@ async function startSilentSearch(keyword, rawSettings = {}) {
   await chrome.storage.local.set({ taskLogs: [] });
   await chrome.action.setBadgeText({ text: '' });
   await log('info', '开始后台搜索', `${keyword}；会员登录已校验；${timeLabel} ${timeRange.start} 至 ${timeRange.end}；高级筛选 ${advancedSummary}；排除词 ${settings.excludeWords.length}/5；相关词 ${settings.relatedWords.length}/5；依次筛选 ${informationTypes.join(' → ')}；间隔 ${settings.intervalMs}ms；并发 ${settings.concurrency}`);
-  const tab = await chrome.tabs.create({ url, active: false });
+  let tab;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try { tab = await chrome.tabs.create({ url, active: false }); break; } catch (e) {
+      if (e.message?.includes('Tabs cannot be edited') && attempt < 4) await sleep(500);
+      else throw e;
+    }
+  }
   await saveTask({ listTabId: tab.id });
   await log('info', '已创建后台结果页', url);
   return { started: true };

@@ -45,6 +45,352 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (element) => element?.innerText?.replace(/\s+/g, ' ').trim() || '';
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 
+// —— 自动破解阿里云滑块验证码 ——
+// 检测背景图中的缺口位置，模拟人类拖拽滑块完成验证
+
+async function autoSolveSliderCaptcha() {
+  try {
+    addLog('info', '检测到滑块验证码，尝试自动破解…', location.href);
+
+    // 1. 等待滑块 DOM 完全渲染
+    const slider = await waitForSliderReady();
+    if (!slider) {
+      addLog('warn', '自动破解失败：滑块未就绪，回退手动模式', '');
+      return false;
+    }
+
+    // 2. 判断验证类型：页面文字是否有"拖动到最右边"
+    const body = document.body?.innerText || '';
+    const isDragToEnd = /拖动到最右边/.test(body);
+
+    // 3. 找滑轨元素
+    const track = findSliderTrack(slider);
+    const trackRect = track.getBoundingClientRect();
+    const sliderRect = slider.getBoundingClientRect();
+    const startX = sliderRect.left + sliderRect.width / 2;
+    const startY = sliderRect.top + sliderRect.height / 2;
+
+    let distance;
+    if (isDragToEnd) {
+      // "拖动到最右边"类型：直接拖到滑轨右端
+      distance = trackRect.right - startX - sliderRect.width * 0.2;
+      addLog('info', `"拖动到最右边"类型验证，拖拽 ${Math.round(distance)}px`, '');
+    } else {
+      // 拼图缺口类型：需要定位缺口
+      const { canvas, img } = await waitForCaptchaImage();
+      if (!canvas && !img) {
+        addLog('warn', '自动破解失败：未找到验证码背景图，回退手动模式', '');
+        return false;
+      }
+      const gapX = findGapX(canvas, img);
+      if (gapX <= 0) {
+        addLog('warn', '自动破解失败：未能定位缺口，回退手动模式',
+          `gapX=${gapX}, canvas=${canvas ? canvas.width + 'x' + canvas.height : 'null'}, img=${img ? img.naturalWidth + 'x' + img.naturalHeight : 'null'}`);
+        return false;
+      }
+      const sourceWidth = canvas ? canvas.width : (img ? img.naturalWidth : trackRect.width);
+      const ratio = trackRect.width / sourceWidth;
+      const targetX = trackRect.left + gapX * ratio;
+      distance = targetX - startX;
+      addLog('info', `缺口定位成功，拖拽 ${Math.round(distance)}px`, '');
+    }
+
+    if (distance < 10 || distance > trackRect.width + 50) {
+      addLog('warn', `自动破解失败：拖拽距离异常 (${Math.round(distance)}px)，回退手动模式`, '');
+      return false;
+    }
+
+    // 4. 模拟人类拖拽
+    await simulateDrag(slider, startX, startY, distance);
+    await sleep(1500);
+
+    // 5. 检测是否成功
+    if (isVerificationCleared()) {
+      addLog('success', '滑块验证码自动破解成功！', '');
+      return true;
+    }
+
+    addLog('info', '第一次拖拽未通过，等待重试…', '');
+    await sleep(800);
+    if (isVerificationCleared()) {
+      addLog('success', '滑块验证码自动破解成功（延迟通过）！', '');
+      return true;
+    }
+
+    addLog('warn', '自动破解未通过验证，回退手动模式', '');
+    return false;
+  } catch (err) {
+    addLog('error', '自动破解异常，回退手动模式', err.message || String(err));
+    return false;
+  }
+}
+
+/** 定位验证码所在的文档：主文档或 iframe 内部 */
+function findCaptchaDocument() {
+  if (document.querySelector('canvas') && document.querySelector('canvas').width >= 100) {
+    return document;
+  }
+  const iframes = document.querySelectorAll('iframe');
+  for (const iframe of iframes) {
+    try {
+      const iDoc = iframe.contentDocument || iframe.contentWindow?.document;
+      if (!iDoc) continue;
+      if (iDoc.querySelector('canvas') || iDoc.querySelector('[class*="captcha"]') ||
+          iDoc.querySelector('[class*="nc_"]') || iDoc.querySelector('[class*="sliding"]')) {
+        return iDoc;
+      }
+    } catch (e) { /* cross-origin */ }
+  }
+  return document;
+}
+
+/** 找滑轨元素 */
+function findSliderTrack(slider) {
+  const track = document.querySelector(
+    '#aliyunCaptcha-sliding-track, [class*="nc_scale"], [class*="sliding-track"], .captcha-slider-track'
+  );
+  if (track) return track;
+  // 兜底：滑块的父级容器中宽度最大的
+  let parent = slider.parentElement;
+  for (let i = 0; i < 3 && parent; i++) {
+    const rect = parent.getBoundingClientRect();
+    if (rect.width > 200) return parent;
+    parent = parent.parentElement;
+  }
+  return slider.parentElement;
+}
+
+/** 等待滑块按钮出现并可交互，最多等 5 秒 */
+function waitForSliderReady() {
+  const selectors = [
+    '#aliyunCaptcha-sliding-slider',
+    '[class*="nc-lang-cnt"] [class*="btn"]',
+    '.nc_scale .nc_btn',
+    '#nc_1_n1z',
+    '.captcha-slider-btn',
+    '[class*="sliding-slider"]',
+    '[class*="slider-btn"]'
+  ];
+  return new Promise((resolve) => {
+    let elapsed = 0;
+    const interval = setInterval(() => {
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) {
+          clearInterval(interval);
+          resolve(el);
+          return;
+        }
+      }
+      elapsed += 200;
+      if (elapsed >= 5000) { clearInterval(interval); resolve(null); }
+    }, 200);
+  });
+}
+
+/** 等待验证码背景图就绪（canvas / img / CSS background-image），最多等 8 秒 */
+function waitForCaptchaImage() {
+  return new Promise((resolve) => {
+    let elapsed = 0;
+    const check = () => {
+      // 1. canvas
+      for (const c of document.querySelectorAll('canvas')) {
+        if (c.width >= 100 && c.height >= 50) return { canvas: c, img: null };
+      }
+      // 2. img（容器内）
+      const container = document.querySelector(
+        '#aliyunCaptcha-sliding-wrapper, .aliyun-captcha, [class*="nc_wrapper"], #your-dom-id, [class*="nc-container"]'
+      );
+      if (container) {
+        for (const imgEl of container.querySelectorAll('img')) {
+          if (imgEl.naturalWidth > 0 || imgEl.width > 0) return { canvas: null, img: imgEl };
+        }
+      }
+      // 3. CSS background-image
+      const bgResult = findCaptchaBackgroundImageInDoc(document);
+      if (bgResult) return bgResult;
+      return null;
+    };
+    const interval = setInterval(() => {
+      const result = check();
+      if (result) { clearInterval(interval); resolve(result); return; }
+      elapsed += 300;
+      if (elapsed >= 8000) { clearInterval(interval); resolve(check() || { canvas: null, img: null }); }
+    }, 300);
+  });
+}
+
+/** 在指定文档中查找 CSS background-image 中的验证码图片 */
+function findCaptchaBackgroundImageInDoc(doc) {
+  const container = doc.querySelector(
+    '#aliyunCaptcha-sliding-wrapper, .aliyun-captcha, [class*="nc_wrapper"], #your-dom-id, [class*="nc-container"]'
+  );
+  if (!container) return null;
+
+  const candidates = [container, ...container.querySelectorAll('*')];
+  for (const el of candidates) {
+    try {
+      const bg = doc.defaultView?.getComputedStyle(el)?.backgroundImage || getComputedStyle(el).backgroundImage;
+      if (!bg || bg === 'none') continue;
+      const match = bg.match(/url\(["']?(data:image[^"')]+)["']?\)/);
+      if (match && match[1]) {
+        const img = new Image();
+        img.src = match[1];
+        if (img.naturalWidth > 0 && img.naturalHeight > 0) return { canvas: null, img };
+      }
+      const urlMatch = bg.match(/url\(["']?(https?:[^"')]+)["']?\)/);
+      if (urlMatch && urlMatch[1]) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = urlMatch[1];
+        if (img.naturalWidth > 0) return { canvas: null, img };
+      }
+    } catch (e) { /* skip */ }
+  }
+
+  for (const el of candidates) {
+    if (el.shadowRoot) {
+      for (const inner of el.shadowRoot.querySelectorAll('canvas, img')) {
+        if (inner.tagName === 'CANVAS' && inner.width >= 100) return { canvas: inner, img: null };
+        if (inner.tagName === 'IMG' && inner.naturalWidth > 0) return { canvas: null, img: inner };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * 在背景图上扫描缺口 x 坐标。
+ * 缺口区域与周围像素有明显边缘差异，用垂直边缘检测找最强边缘列。
+ */
+function findGapX(sourceCanvas, sourceImg) {
+  let canvas = sourceCanvas;
+  if (!canvas && sourceImg) {
+    canvas = document.createElement('canvas');
+    canvas.width = sourceImg.naturalWidth || sourceImg.width;
+    canvas.height = sourceImg.naturalHeight || sourceImg.height;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(sourceImg, 0, 0);
+  }
+  if (!canvas) return -1;
+
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) return -1;
+  const w = canvas.width;
+  const h = canvas.height;
+  if (w < 60 || h < 60) return -1;
+
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const data = imgData.data;
+
+  // 转灰度
+  const gray = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const p = i * 4;
+    gray[i] = (data[p] * 77 + data[p + 1] * 150 + data[p + 2] * 29) >> 8;
+  }
+
+  // 忽略左右各 10% 区域（拼图块通常在中间 10%-90%）
+  const xStart = Math.floor(w * 0.1);
+  const xEnd = Math.floor(w * 0.9);
+  const yStart = Math.floor(h * 0.1);
+  const yEnd = Math.floor(h * 0.9);
+
+  // 计算每列的垂直边缘强度（相邻列灰度差的绝对值之和）
+  const colEdge = new Float64Array(w);
+  for (let x = xStart; x < xEnd; x++) {
+    let sum = 0;
+    for (let y = yStart; y < yEnd; y++) {
+      const diff = Math.abs(gray[y * w + x] - gray[y * w + x + 1]);
+      sum += diff;
+    }
+    colEdge[x] = sum;
+  }
+
+  // 平滑（3 列窗口）
+  const smoothed = new Float64Array(w);
+  for (let x = 1; x < w - 1; x++) {
+    smoothed[x] = (colEdge[x - 1] + colEdge[x] + colEdge[x + 1]) / 3;
+  }
+
+  // 找最强边缘列，但要排除极左（拼图块自身边缘）
+  const ignoreLeft = Math.floor(w * 0.15);
+  let bestX = -1;
+  let bestVal = 0;
+  for (let x = ignoreLeft; x < xEnd - 1; x++) {
+    if (smoothed[x] > bestVal) {
+      bestVal = smoothed[x];
+      bestX = x;
+    }
+  }
+
+  // 阈值：边缘强度必须足够高，否则认为没找到
+  if (bestVal < 800) return -1;
+  return bestX;
+}
+
+/**
+ * 模拟人类拖拽：先加速后减速（ease-in-out），带随机抖动。
+ * @param {Element} el 滑块按钮
+ * @param {number} sx 起始 x（视口坐标）
+ * @param {number} sy 起始 y
+ * @param {number} distance 拖拽距离 px
+ */
+async function simulateDrag(el, sx, sy, distance) {
+  const totalMs = 400 + Math.random() * 300; // 400-700ms
+  const steps = 25 + Math.floor(Math.random() * 15); // 25-40 步
+
+  // mousedown
+  el.dispatchEvent(new MouseEvent('mousedown', {
+    bubbles: true, cancelable: true, clientX: sx, clientY: sy, button: 0
+  }));
+
+  // 生成轨迹点（ease-in-out t³(6t²-15t+10)）
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    // quintic ease-in-out
+    const eased = t < 0.5 ? 16 * t * t * t * t * t : 1 - Math.pow(-2 * t + 2, 5) / 2;
+    const jitterY = (Math.random() - 0.5) * 3; // ±1.5px 纵向抖动
+    const cx = sx + distance * eased;
+    const cy = sy + jitterY;
+
+    await sleep(totalMs / steps);
+    document.dispatchEvent(new MouseEvent('mousemove', {
+      bubbles: true, cancelable: true, clientX: cx, clientY: cy, button: 1
+    }));
+  }
+
+  // 确保到达终点（微小随机偏移模拟人类不精确）
+  const finalX = sx + distance + (Math.random() - 0.5) * 2;
+  const finalY = sy + (Math.random() - 0.5) * 2;
+  await sleep(30 + Math.random() * 50);
+  document.dispatchEvent(new MouseEvent('mousemove', {
+    bubbles: true, cancelable: true, clientX: finalX, clientY: finalY, button: 1
+  }));
+  await sleep(20 + Math.random() * 30);
+  document.dispatchEvent(new MouseEvent('mouseup', {
+    bubbles: true, cancelable: true, clientX: finalX, clientY: finalY, button: 0
+  }));
+}
+
+/** 检测滑块验证是否已消失或显示成功 */
+function isVerificationCleared() {
+  // 验证容器消失
+  const wrapper = document.querySelector(
+    '#aliyunCaptcha-sliding-wrapper, .aliyun-captcha, [class*="nc_wrapper"], [class*="nc-container"]'
+  );
+  if (!wrapper || wrapper.offsetParent === null || getComputedStyle(wrapper).display === 'none') return true;
+  // 成功文字
+  const body = document.body?.innerText || '';
+  if (/验证成功|验证通过|通过验证|✓|✔/.test(body)) return true;
+  // 滑块按钮消失
+  const slider = document.querySelector(
+    '#aliyunCaptcha-sliding-slider, [class*="sliding-slider"], [class*="slider-btn"]'
+  );
+  if (!slider || slider.offsetParent === null) return true;
+  return false;
+}
+
 async function taskState() {
   const { task = { status: 'idle', records: [], completedPages: [] } } = await chrome.storage.local.get('task');
   return task;
@@ -877,6 +1223,15 @@ async function processResults() {
     });
     if (!entries.length) {
       if (verificationVisible()) {
+        if (sliderVerificationVisible()) {
+          const solved = await autoSolveSliderCaptcha();
+          if (solved) {
+            addLog('success', '搜索页滑块自动破解成功，继续采集', '');
+            // 刷新结果等待
+            continueNextPage = true;
+            return;
+          }
+        }
         await waitAndReloadAfterVerification();
         return;
       }
@@ -1010,8 +1365,38 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 (async () => {
   if (verificationVisible()) {
-    await waitAndReloadAfterVerification();
-    return;
+    if (sliderVerificationVisible()) {
+      // 首次弹出时验证码 DOM 可能错乱，先刷新页面再破解
+      const { captchaReloading = false } = await chrome.storage.local.get('captchaReloading');
+      if (!captchaReloading) {
+        await chrome.storage.local.set({ captchaReloading: true });
+        addLog('info', '检测到滑块验证码，先刷新页面再自动破解', location.href);
+        await sleep(300);
+        location.reload();
+        return;
+      }
+      // 已刷新过，清除标记，开始破解
+      await chrome.storage.local.set({ captchaReloading: false });
+      await sleep(500); // 等页面渲染稳定
+      const solved = await autoSolveSliderCaptcha();
+      if (solved) {
+        await chrome.runtime.sendMessage({ type: 'VERIFICATION_COMPLETED', url: location.href });
+        await sleep(2000);
+        if (verificationVisible()) {
+          await waitAndReloadAfterVerification();
+          return;
+        }
+      } else {
+        await waitAndReloadAfterVerification();
+        return;
+      }
+    } else {
+      await waitAndReloadAfterVerification();
+      return;
+    }
+  } else {
+    // 页面正常时清除可能残留的刷新标记
+    await chrome.storage.local.set({ captchaReloading: false });
   }
   const initialState = await taskState();
   if (initialState.status === 'verification_wait') {
