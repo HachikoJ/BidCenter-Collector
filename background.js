@@ -4,7 +4,7 @@ const DETAIL_STAGGER_MAX_MS = 3000;
 const DETAIL_INTERVAL_JITTER_MIN_MS = -2000;
 const DETAIL_INTERVAL_JITTER_MAX_MS = 2000;
 const DEFAULT_SETTINGS = {
-  intervalMs: 5000,
+  intervalMs: 15000,
   concurrency: 3,
   pageSize: 40
 };
@@ -14,8 +14,8 @@ const ALL_INFORMATION_TYPES = [
 ];
 const DEFAULT_INFORMATION_TYPES = ['招标公告', '中标结果'];
 const ADVANCED_FILTER_KEYS = ['purchaseMethod', 'fundingSource', 'evaluationMethod', 'qualificationCertificate'];
-const PLATFORM_DAILY_LIMIT = 800;
-const PLUGIN_DAILY_LIMIT = 780;
+const PLATFORM_DAILY_LIMIT = 1300;
+const PLUGIN_DAILY_LIMIT = 1280;
 const ACTIVATION_STORAGE_KEY = 'collectorActivation';
 const activeDetailTabs = new Map();
 const verificationTabs = new Set();
@@ -26,6 +26,7 @@ let partialQueue = Promise.resolve();
 let quotaQueue = Promise.resolve();
 let dailyLimitQueue = Promise.resolve();
 let batchGeneration = 0;
+let adaptiveSuccessStreak = 0;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDetailStaggerMs = () => Math.floor(
   Math.random() * (DETAIL_STAGGER_MAX_MS - DETAIL_STAGGER_MIN_MS + 1)
@@ -55,15 +56,32 @@ function inspectBidcenterLoginPage() {
     || /^sso\.bidcenter\.com\.cn$/i.test(location.hostname)) {
     return { loggedIn: false, definitive: true, reason: '当前页面是登录页面' };
   }
+  const textOf = (element) => (element?.innerText || element?.textContent || '').trim();
+  const hasAccountLink = (element) => [...element.querySelectorAll('a')].some((link) => {
+    const text = textOf(link);
+    return /^(?:用户中心|订阅信息|个人信息|退出|退出登录|安全退出)$/.test(text)
+      || /^user\.bidcenter\.com\.cn$/i.test(link.hostname);
+  });
+
+  const currentAccountPanel = [...document.querySelectorAll('#ydlHover, .ydl-txt, .ydl-zhong')]
+    .find((element) => visible(element) && hasAccountLink(element));
+  const visibleMemberLevel = [...document.querySelectorAll('.ydl-hyxx, .ydl-yhxx, .index-register_lan')]
+    .find((element) => visible(element) && /会员级别\s*[：:]/.test(textOf(element)));
+  if (currentAccountPanel || visibleMemberLevel) {
+    return { loggedIn: true, definitive: true, reason: '页面显示当前账号、会员级别或用户中心入口', url: currentUrl };
+  }
+
   const loggedInPanel = [...document.querySelectorAll('.ssjg-header_login.islogin')].find(visible);
-  const visibleLogout = loggedInPanel && [...loggedInPanel.querySelectorAll('a, button')]
-    .some((element) => visible(element) && /^(退出|退出登录|安全退出)$/.test((element.innerText || element.textContent || '').trim()));
-  if (loggedInPanel && visibleLogout) {
+  if (loggedInPanel && hasAccountLink(loggedInPanel)) {
     return { loggedIn: true, definitive: true, reason: '页面显示已登录账号和退出入口', url: currentUrl };
   }
   const loggedOutPanel = [...document.querySelectorAll('.ssjg-header_login.nologin')].find(visible);
+  const currentLoggedOutPanel = [...document.querySelectorAll('.wdl-zhong')].find((element) => (
+    visible(element) && [...element.querySelectorAll('a')]
+      .some((link) => visible(link) && /^(?:登录|注册)$/.test(textOf(link)))
+  ));
   const visiblePassword = [...document.querySelectorAll('input[type="password"]')].some(visible);
-  if (loggedOutPanel || visiblePassword) {
+  if (loggedOutPanel || currentLoggedOutPanel || visiblePassword) {
     return { loggedIn: false, definitive: true, reason: '页面显示登录入口或登录表单', url: currentUrl };
   }
   return { loggedIn: false, definitive: false, reason: '页面未出现可确认的登录标识', url: currentUrl };
@@ -276,6 +294,8 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
 });
+// 常驻心跳（30 秒）：SW 冷启动时重建，防止空闲/长等待期间被 Chrome 回收导致任务冻结
+chrome.alarms.create('collector-keepalive', { periodInMinutes: 0.5 });
 
 async function taskState() {
   const { task = { status: 'idle', records: [], completedPages: [], logs: [] } } = await chrome.storage.local.get('task');
@@ -308,6 +328,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     return { started: false, dailyLimit: true, message: `今日插件访问已达 ${quota.used}/${quota.limit}，请次日继续。` };
   }
   batchGeneration += 1;
+  adaptiveSuccessStreak = 0;
   const previous = await taskState();
   if (previous.listTabId) await chrome.tabs.remove(previous.listTabId).catch(() => undefined);
   const settings = normalizeSettings(rawSettings);
@@ -320,6 +341,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     status: 'searching', keyword, records: [], completedPages: [], currentPage: 1,
     currentPageCount: 0, batchTotal: 0, batchDone: 0, batchFailed: 0, partialRecords: [],
     settings,
+    adaptive: { intervalMs: settings.intervalMs, concurrency: settings.concurrency, verificationCount: 0, successStreak: 0 },
     informationTypes, typeFilterIndex: 0,
     currentType: informationTypes[0], completedTypes: [],
     typeFilterApplied: false, typeFilterPending: '', filterStage: '',
@@ -374,6 +396,110 @@ function normalizeSettings(value = {}) {
   };
 }
 
+// —— 自适应降速：触发验证自动拉长间隔/降并发，稳定后逐步回调 ——
+// 分段长等待：MV3 Service Worker 30 秒无事件会被回收，60 秒间隔的纯 sleep 会冻结任务。
+// 每 15 秒醒来查一次状态（chrome.storage API 调用兼作保活），暂停/停止/换代即时响应。
+async function sleepChunked(totalMs, expectedGeneration) {
+  const endAt = Date.now() + totalMs;
+  while (Date.now() < endAt) {
+    await sleep(Math.min(15000, Math.max(1, endAt - Date.now())));
+    const state = await taskState();
+    if (expectedGeneration !== batchGeneration) return;
+    if (state && !['searching', 'filtering', 'running', 'verification_wait'].includes(state.status)) return;
+  }
+}
+
+function effectiveSettings(state = {}) {
+  const base = normalizeSettings(state.settings || {});
+  const adaptive = state.adaptive;
+  if (!adaptive) return base;
+  return {
+    ...base,
+    intervalMs: Math.min(60000, Math.max(base.intervalMs, Number(adaptive.intervalMs) || base.intervalMs)),
+    concurrency: Math.min(base.concurrency, Math.max(1, Number(adaptive.concurrency) || base.concurrency))
+  };
+}
+
+async function escalateAdaptiveSettings() {
+  const current = await taskState();
+  if (!['searching', 'filtering', 'running', 'verification_wait'].includes(current.status)) return null;
+  const base = normalizeSettings(current.settings || {});
+  const prev = current.adaptive
+    || { intervalMs: base.intervalMs, concurrency: base.concurrency, verificationCount: 0, successStreak: 0 };
+  const prevInterval = Math.max(Number(prev.intervalMs) || base.intervalMs, base.intervalMs);
+  const prevConcurrency = Number(prev.concurrency) || base.concurrency;
+  const verificationCount = (Number(prev.verificationCount) || 0) + 1;
+  const growFactor = 1.8 + 0.2 * Math.min(4, verificationCount);
+  const intervalFloor = Math.max(15000, Math.round(base.intervalMs * 1.8));
+  const intervalMs = Math.min(60000, Math.max(intervalFloor, Math.round(prevInterval * growFactor)));
+  const concurrency = 1;
+  adaptiveSuccessStreak = 0;
+  await saveTask({ adaptive: { intervalMs, concurrency, verificationCount, successStreak: 0 } });
+  const stats = await recordVerificationEvent(prevInterval, prevConcurrency);
+  await log('warn', '触发验证，自适应降速（实测数据点）',
+    `第 ${verificationCount} 次：详情间隔 ${prevInterval}→${intervalMs}ms${concurrency !== prevConcurrency ? `；并发 ${prevConcurrency}→${concurrency}` : ''}；触发前节奏=近10分钟 ${stats.opens10m} 次/近1小时 ${stats.opens60m} 次；距上次验证 ${stats.minSinceVerify ?? '无记录'} 分钟`);
+  return { intervalMs, concurrency };
+}
+
+async function maybeRecoverAdaptive(expectedGeneration) {
+  adaptiveSuccessStreak += 1;
+  if (adaptiveSuccessStreak % 60 !== 0 || expectedGeneration !== batchGeneration) return;
+  const current = await taskState();
+  const base = normalizeSettings(current.settings || {});
+  const adaptive = current.adaptive;
+  if (!adaptive || Number(adaptive.intervalMs) <= base.intervalMs) return;
+  const intervalMs = Math.max(base.intervalMs, Math.round(adaptive.intervalMs / 1.3));
+  const concurrency = Math.min(base.concurrency, (Number(adaptive.concurrency) || 1) + 1);
+  await saveTask({ adaptive: { ...adaptive, intervalMs, concurrency, successStreak: 0 } });
+  await log('info', '采集持续稳定，自动回调速度',
+    `详情间隔 ${adaptive.intervalMs}→${intervalMs}ms；并发 ${adaptive.concurrency}→${concurrency}；再次触发验证会重新降速`);
+}
+
+// —— 被动速度校准：记录真实运行中的请求节奏与验证事件，实证判断安全速度带（不主动触发验证） ——
+async function calibrationLogEntries() {
+  const { calibrationLog = [] } = await chrome.storage.local.get('calibrationLog');
+  return calibrationLog;
+}
+
+function calibrationStats(log = []) {
+  const now = Date.now();
+  const opens = log.filter((entry) => entry.kind === 'open').map((entry) => Number(entry.time) || 0);
+  const verifies = log.filter((entry) => entry.kind === 'verify').map((entry) => Number(entry.time) || 0);
+  const lastVerify = verifies.length ? Math.max(...verifies) : 0;
+  return {
+    opens10m: opens.filter((t) => now - t < 600000).length,
+    opens60m: opens.filter((t) => now - t < 3600000).length,
+    minSinceVerify: lastVerify ? Math.round((now - lastVerify) / 60000) : null,
+    verifies24h: verifies.filter((t) => now - t < 86400000).length
+  };
+}
+
+async function recordDetailOpen() {
+  const log = await calibrationLogEntries();
+  log.push({ time: Date.now(), kind: 'open' });
+  await chrome.storage.local.set({ calibrationLog: log.slice(-500) });
+}
+
+async function recordVerificationEvent(intervalMs, concurrency) {
+  const log = await calibrationLogEntries();
+  const stats = calibrationStats(log);
+  log.push({ time: Date.now(), kind: 'verify', intervalMs, concurrency, ...stats });
+  await chrome.storage.local.set({ calibrationLog: log.slice(-500) });
+  return stats;
+}
+
+function verificationRecoveryCooldownMs(state = {}) {
+  // 实测：滑块解完后仅 60 秒即重开列表页，3 秒内再次触发滑块（风险分未衰减）。
+  // 恢复冷却按 3 分钟起步，每多一次验证 +1 分钟，5 分钟封顶。
+  const count = Math.max(1, Number(state.adaptive?.verificationCount) || 1);
+  return Math.min(300000, 180000 + (count - 1) * 60000);
+}
+
+function originalVerificationTarget(state = {}, pendingUrl = '') {
+  const candidate = pendingUrl || state.verificationUrl || state.listUrl || '';
+  return /(?:\/alivalidate|captcha|verify)/i.test(candidate) ? (state.listUrl || '') : candidate;
+}
+
 function armDetailTimeout(tabId, pending) {
   clearTimeout(pending.timer);
   pending.timer = setTimeout(async () => {
@@ -405,10 +531,11 @@ async function openSilentDetail(url, title, expectedGeneration) {
   }
   log('info', '后台打开详情页', `${title || url}；活动详情 ${activeDetailTabs.size} 个；使用浏览器已登录会话${createProperties.openerTabId ? '，关联结果页' : ''}`);
   const tab = await chrome.tabs.create(createProperties);
+  recordDetailOpen().catch(() => undefined);
   return { openedAt: Date.now(), result: waitForDetail(tab.id, url, title) };
 }
 
-async function clearVerification(tabId) {
+async function clearVerification(tabId, { preserveCooldown = false } = {}) {
   verificationTabs.delete(tabId);
   await chrome.alarms.clear(`verification-${tabId}`);
   const current = await taskState();
@@ -424,6 +551,10 @@ async function clearVerification(tabId) {
     return;
   }
   if (current.status === 'verification_wait') {
+    if (preserveCooldown && current.verificationMode === 'cooldown') {
+      await saveTask({ verificationTabIds: [] });
+      return;
+    }
     const resumeStatus = ['paused', 'daily_limit'].includes(current.verificationResumeStatus)
       ? current.verificationResumeStatus : 'running';
     const timingPatch = resumeStatus === 'running' ? resumedTimingPatch(current) : {};
@@ -441,7 +572,7 @@ async function finishDetail(tabId, record, error) {
   activeDetailTabs.delete(tabId);
   clearTimeout(pending.timer);
   await chrome.tabs.remove(tabId).catch(() => undefined);
-  await clearVerification(tabId);
+  await clearVerification(tabId, { preserveCooldown: true });
   if (error) {
     await log('error', '详情采集失败', `${pending.title || pending.url}：${error}`);
     pending.reject(new Error(error));
@@ -467,7 +598,7 @@ async function runDetailBatch(entries) {
   const generation = batchGeneration;
   const { task: batchTask = {} } = await chrome.storage.local.get('task');
   await requireMemberLogin({ preferredTabId: batchTask.listTabId, allowProbe: false });
-  const settings = normalizeSettings(batchTask.settings);
+  const settings = effectiveSettings(batchTask);
   await saveTask({ batchTotal: entries.length, batchDone: 0, batchFailed: 0 });
   await log('info', `开始整页批量采集 ${entries.length} 条`, `并发数 ${Math.min(settings.concurrency, entries.length)}，基础间隔 ${settings.intervalMs}ms（每条随机 ±2 秒），每次启动随机错峰 0.1-3 秒`);
   const results = new Array(entries.length);
@@ -495,6 +626,7 @@ async function runDetailBatch(entries) {
         state = await taskState();
       }
       if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return null;
+      const liveSettings = effectiveSettings(state);
       const quota = await reserveDailyQuotaSlot();
       if (!quota.reserved) {
         await markDailyLimitReached(quota.usage);
@@ -504,7 +636,7 @@ async function runDetailBatch(entries) {
       const intervalLabel = intervalTiming.hasPrevious
         ? `基础间隔 ${intervalTiming.baseMs}ms，随机偏移 ${jitterLabel}ms，实际 ${intervalTiming.actualMs}ms；`
         : '本通道首条无需前序间隔；';
-      await log('info', `并发通道 ${workerId} 错峰启动详情`, `${intervalLabel}启动错峰 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(settings.concurrency, entries.length)}`);
+      await log('info', `并发通道 ${workerId} 错峰启动详情`, `${intervalLabel}启动错峰 ${staggerMs}ms；活动详情 ${activeDetailTabs.size + 1}/${Math.min(liveSettings.concurrency, entries.length)}`);
       const opened = await openSilentDetail(entry.url, entry.title, generation);
       return opened;
     } finally {
@@ -517,6 +649,11 @@ async function runDetailBatch(entries) {
     workerLastOpenAt.set(workerId, 0);
     while (nextIndex < entries.length && generation === batchGeneration) {
       let state = await taskState();
+      while (workerId > effectiveSettings(state).concurrency && generation === batchGeneration) {
+        if (!['searching', 'filtering', 'running', 'verification_wait'].includes(state.status)) return;
+        await sleep(1000);
+        state = await taskState();
+      }
       while (state.status === 'verification_wait' && generation === batchGeneration) {
         await sleep(1000);
         state = await taskState();
@@ -529,19 +666,19 @@ async function runDetailBatch(entries) {
       const entry = entries[index];
       try {
         const intervalJitterMs = randomDetailIntervalJitterMs();
-        let intervalMs = normalizeSettings(state.settings).intervalMs;
+        let intervalMs = effectiveSettings(state).intervalMs;
         let actualIntervalMs = effectiveDetailIntervalMs(intervalMs, intervalJitterMs);
         const now = Date.now();
         const lastOpenAt = workerLastOpenAt.get(workerId) || 0;
         const scheduledAt = Math.max(now, lastOpenAt + actualIntervalMs);
-        if (scheduledAt > now) await sleep(scheduledAt - now);
+        if (scheduledAt > now) await sleepChunked(scheduledAt - now, generation);
         state = await taskState();
         if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
-        intervalMs = normalizeSettings(state.settings).intervalMs;
+        intervalMs = effectiveSettings(state).intervalMs;
         actualIntervalMs = effectiveDetailIntervalMs(intervalMs, intervalJitterMs);
         const resumedScheduledAt = lastOpenAt + actualIntervalMs;
         if (resumedScheduledAt > Date.now()) {
-          await sleep(resumedScheduledAt - Date.now());
+          await sleepChunked(resumedScheduledAt - Date.now(), generation);
           state = await taskState();
           if (generation !== batchGeneration || !['searching', 'filtering', 'running'].includes(state.status)) return;
         }
@@ -556,6 +693,7 @@ async function runDetailBatch(entries) {
         const record = await opened.result;
         if (generation !== batchGeneration) return;
         await updateBatchProgress(false, generation);
+        await maybeRecoverAdaptive(generation);
         results[index] = { url: entry.url, summary: entry.summary, record };
         await persistPartialResult(results[index], generation);
       } catch (error) {
@@ -566,7 +704,28 @@ async function runDetailBatch(entries) {
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(settings.concurrency, entries.length) }, () => worker()));
+  // 可扩张通道池：批次中途调大并发时，监督循环每秒比对有效并发并即时补充新通道；
+  // 调小并发由 worker 内部的收缩等待处理（多余通道闲置但不退出）。
+  const activeWorkers = new Set();
+  const spawnWorker = () => {
+    const tracked = worker().finally(() => { activeWorkers.delete(tracked); });
+    tracked.catch(() => undefined);
+    activeWorkers.add(tracked);
+  };
+  for (let i = 0; i < Math.min(settings.concurrency, entries.length); i += 1) spawnWorker();
+  while (generation === batchGeneration) {
+    const state = await taskState();
+    if (!['searching', 'filtering', 'running', 'verification_wait'].includes(state.status)) break;
+    const desired = Math.min(effectiveSettings(state).concurrency, entries.length);
+    if (nextIndex < entries.length && activeWorkers.size < desired) {
+      const from = activeWorkers.size;
+      while (activeWorkers.size < desired && nextIndex < entries.length) spawnWorker();
+      await log('info', '并发已调大，补充采集通道', `${from} → ${activeWorkers.size}`);
+    }
+    if (!activeWorkers.size) break;
+    await sleep(1000);
+  }
+  await Promise.allSettled([...activeWorkers]);
   const completedResults = results.filter(Boolean);
   if (generation !== batchGeneration) return completedResults;
   const failed = completedResults.filter((result) => result.error).length;
@@ -619,7 +778,7 @@ async function stopTask() {
   await log('warn', '用户停止任务，请尽快导出 Excel', `运行 ${formatDuration(timing.activeMs)}；暂停 ${formatDuration(timing.pausedMs)}；避免浏览器清理或任务重置后结果失效无法下载`);
 }
 
-async function resumeTask(requestedIntervalMs) {
+async function resumeTask(requestedIntervalMs, requestedConcurrency) {
   const current = await taskState();
   await requireMemberLogin({ preferredTabId: current.listTabId });
   const quota = await getDailyQuotaUsage();
@@ -630,12 +789,24 @@ async function resumeTask(requestedIntervalMs) {
   let tab = current.listTabId ? await chrome.tabs.get(current.listTabId).catch(() => null) : null;
   if (!tab && current.listUrl) tab = await chrome.tabs.create({ url: current.listUrl, active: false });
   if (!tab) throw new Error('没有可继续的后台结果页，请重新开始任务。');
-  const intervalMs = Math.min(30000, Math.max(200,
+  const taskSettings = { ...(current.settings || {}) };
+  taskSettings.intervalMs = Math.min(60000, Math.max(200,
     Number(requestedIntervalMs) || Number(current.settings?.intervalMs) || DEFAULT_SETTINGS.intervalMs));
-  const taskSettings = { ...(current.settings || {}), intervalMs };
-  await saveTask({ status: 'running', listTabId: tab.id, settings: taskSettings, error: '', ...resumedTimingPatch(current) });
+  taskSettings.concurrency = Math.min(6, Math.max(1,
+    Number(requestedConcurrency) || Number(current.settings?.concurrency) || DEFAULT_SETTINGS.concurrency));
+  // 用户在侧栏调整后点「继续」= 接管速度：以新值重置自适应钳制（验证计数保留，冷却递增保护不变）
+  const prevAdaptive = current.adaptive || {};
+  const tookOver = Number(requestedIntervalMs) || Number(requestedConcurrency);
+  const adaptive = {
+    intervalMs: taskSettings.intervalMs,
+    concurrency: taskSettings.concurrency,
+    verificationCount: Number(prevAdaptive.verificationCount) || 0,
+    successStreak: 0
+  };
+  await saveTask({ status: 'running', listTabId: tab.id, settings: taskSettings, adaptive, error: '', ...resumedTimingPatch(current) });
   await chrome.action.setBadgeText({ text: '' });
-  await log('info', '继续后台采集', `会员登录已校验；详情间隔 ${intervalMs}ms；${current.listUrl || tab.url || ''}`);
+  await log('info', '继续后台采集',
+    `会员登录已校验；详情间隔 ${taskSettings.intervalMs}ms；并发 ${taskSettings.concurrency}${tookOver && (Number(prevAdaptive.intervalMs) > taskSettings.intervalMs || Number(prevAdaptive.concurrency) < taskSettings.concurrency) ? '；已按用户设置覆盖自适应降速（再触发验证会重新降速）' : ''}；${current.listUrl || tab.url || ''}`);
   await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' }).catch(async () => {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
     await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' });
@@ -717,7 +888,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const currentManual = current.verificationMode === 'manual';
       const detectedManual = riskType !== 'frequency';
       const manual = currentManual || detectedManual;
-      const cooldownMs = 60000;
+      const cooldownMs = Math.min(300000, 60000 * Math.min(5, (Number(current.adaptive?.verificationCount) || 0) + 1));
       const verificationUntil = manual ? 0 : Date.now() + cooldownMs;
       const verificationTabIds = [...new Set([
         ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : []),
@@ -735,6 +906,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       await chrome.action.setBadgeBackgroundColor({ color: '#b54708' });
       await chrome.action.setBadgeText({ text: manual ? '验证' : 'WAIT' });
+      await escalateAdaptiveSettings().catch(() => undefined);
       if (tabId && detectedManual) {
         await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
         if (sender.tab?.windowId) await chrome.windows.update(sender.tab.windowId, { focused: true }).catch(() => undefined);
@@ -758,14 +930,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const knownTab = verificationTabs.has(sender.tab.id) || storedIds.includes(sender.tab.id)
         || (current.status === 'verification_wait' && sender.tab.id === current.listTabId);
       if (!knownTab) return sendResponse({ resumed: false });
+      if (current.verificationMode === 'cooldown') {
+        return sendResponse({ resumed: false, cooldownMs: Math.max(0, (current.verificationUntil || 0) - Date.now()) });
+      }
       const pending = activeDetailTabs.get(sender.tab.id);
-      if (pending) armDetailTimeout(sender.tab.id, pending);
+      const resumeUrl = originalVerificationTarget(current, pending?.url);
       await clearVerification(sender.tab.id);
       const latest = await taskState();
-      if (latest.status === 'running') {
-        await log('success', '滑块验证已完成，自动继续采集', sender.tab.url || '');
+      if (latest.status !== 'running') return sendResponse({ resumed: false });
+      const cooldownMs = verificationRecoveryCooldownMs(latest);
+      await saveTask({
+        status: 'verification_wait', verificationUntil: Date.now() + cooldownMs,
+        verificationMode: 'cooldown', verificationRiskType: 'post_verification',
+        verificationTabIds: [], verificationUrl: resumeUrl,
+        verificationResumeStatus: 'running', error: ''
+      });
+      await chrome.action.setBadgeText({ text: 'WAIT' });
+      await chrome.alarms.create(`verification-${sender.tab.id}`, { delayInMinutes: cooldownMs / 60000 });
+      await log('success', '滑块验证已完成，进入恢复冷却',
+        `等待 ${Math.round(cooldownMs / 1000)} 秒后继续；${resumeUrl}`);
+      sendResponse({ resumed: false, cooldownMs });
+    })().catch((error) => sendResponse({ error: error.message }));
+    return true;
+  }
+  if (message.type === 'UPDATE_RUN_SETTINGS') {
+    (async () => {
+      const current = await taskState();
+      if (!['searching', 'filtering', 'running', 'paused', 'verification_wait'].includes(current.status)) {
+        sendResponse({ ok: false, message: '当前没有运行中的任务，设置已保存，下次开始时使用。' });
+        return;
       }
-      sendResponse({ resumed: latest.status === 'running' });
+      const intervalMs = Math.min(60000, Math.max(200, Number(message.intervalMs) || DEFAULT_SETTINGS.intervalMs));
+      const concurrency = Math.min(6, Math.max(1, Number(message.concurrency) || DEFAULT_SETTINGS.concurrency));
+      const taskSettings = { ...(current.settings || {}), intervalMs, concurrency };
+      const prevAdaptive = current.adaptive || {};
+      // 用户实时调整 = 接管速度：以新值重置自适应钳制（验证计数保留，冷却递增保护不变）
+      const adaptive = {
+        intervalMs, concurrency,
+        verificationCount: Number(prevAdaptive.verificationCount) || 0,
+        successStreak: 0
+      };
+      await saveTask({ settings: taskSettings, adaptive });
+      const covered = Number(prevAdaptive.intervalMs) > intervalMs || Number(prevAdaptive.concurrency) < concurrency;
+      await log('info', '设置已实时更新',
+        `详情间隔 ${intervalMs}ms（下一条详情生效）；并发 ${concurrency}（调大调小均即时生效）${covered ? '；已覆盖自适应降速，再触发验证会重新降速' : ''}`);
+      sendResponse({ ok: true });
     })().catch((error) => sendResponse({ error: error.message }));
     return true;
   }
@@ -789,7 +998,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === 'RESUME_SILENT') {
     requireActivation()
-      .then(() => resumeTask(message.intervalMs))
+      .then(() => resumeTask(message.intervalMs, message.concurrency))
       .then((result) => sendResponse({ ok: result.resumed !== false, ...result }))
       .catch(async (error) => {
         if (error.code === 'LOGIN_REQUIRED') {
@@ -819,7 +1028,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await stopTask();
       await Promise.allSettled([progressQueue, partialQueue]);
       await chrome.storage.local.remove([
-        'task', 'taskLogs', 'collectorSettings', 'systemErrors',
+        'task', 'taskLogs', 'collectorSettings', 'systemErrors', 'calibrationLog',
         'officialAdvancedFilterOptions', 'keywordOptions', 'intervalDefault5000Migrated', ACTIVATION_STORAGE_KEY
       ]);
       await chrome.action.setBadgeText({ text: '' });
@@ -831,13 +1040,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'collector-keepalive') {
+    // 常驻心跳：任何长等待/空闲期间写一次 storage，防止 Service Worker 被回收
+    await chrome.storage.local.set({ keepAliveAt: Date.now() }).catch(() => undefined);
+    return;
+  }
   const tabId = Number(alarm.name.match(/^verification-(\d+)$/)?.[1]);
   if (!tabId) return;
   const pending = activeDetailTabs.get(tabId);
   const current = await taskState();
   if (current.status !== 'verification_wait') return;
-  const targetUrl = pending?.url || current.listUrl;
-  await log('info', '访问频控冷却结束，重新打开原页面', targetUrl || String(tabId));
+  const targetUrl = originalVerificationTarget(current, pending?.url);
+  const cooldownLabel = current.verificationRiskType === 'post_verification' ? '验证恢复冷却结束' : '访问频控冷却结束';
+  await log('info', `${cooldownLabel}，重新打开原页面`, targetUrl || String(tabId));
   await clearVerification(tabId);
   if (!targetUrl) return;
   if (pending) armDetailTimeout(tabId, pending);

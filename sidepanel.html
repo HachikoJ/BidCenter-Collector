@@ -13,7 +13,7 @@
           <img class="activation-logo" src="logo.svg" alt="采招网采集助手 logo">
           <div>
             <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.35</span></strong>
+            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.47</span></strong>
           </div>
         </header>
 
@@ -54,7 +54,7 @@
       <header class="topbar">
         <img class="brand-logo" src="logo.svg" alt="采招网采集助手 logo">
         <div class="brand-copy">
-          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.35</span></h1>
+          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v1.9.47</span></h1>
           <div class="topbar-meta">
             <a class="project-link" href="https://github.com/HachikoJ/BidCenter-Collector" target="_blank" rel="noopener noreferrer" title="访问 GitHub 公开项目">GitHub 项目</a>
             <span>© 2026 Wilson</span>
@@ -74,13 +74,13 @@
         <div class="metrics" aria-label="任务指标">
           <div class="metric"><span class="metric-label">已采集</span><span class="metric-value" id="record-count">0</span></div>
           <div class="metric"><span class="metric-label">页码</span><span class="metric-value" id="current-page">-/-</span></div>
-          <div class="metric"><span class="metric-label">今日访问</span><span class="metric-value" id="quota-count">0/780</span></div>
+          <div class="metric"><span class="metric-label">今日访问</span><span class="metric-value" id="quota-count">0/1280</span></div>
           <div class="metric"><span class="metric-label">错误</span><span class="metric-value error-value" id="failed-count">0</span></div>
         </div>
       </section>
 
       <section class="search-panel">
-        <div class="section-heading"><span>采集控制</span><small>浏览器当前会话</small></div>
+        <div class="section-heading"><span>采集控制</span><small>间隔/并发改动即时生效（间隔下一条详情应用）</small></div>
         <label class="field-label" for="keyword">搜索关键词</label>
         <div class="keyword-toolbar">
           <div id="keyword-combobox" class="keyword-combobox">
@@ -145,7 +145,7 @@
             <span class="stepper-wrap">
               <span class="stepper">
                 <button id="interval-decrease" class="stepper-button" type="button" aria-label="减少详情间隔" title="减少 100 毫秒">−</button>
-                <input id="interval" type="number" min="200" max="30000" step="100" value="5000" inputmode="numeric" aria-label="详情间隔（毫秒）">
+                <input id="interval" type="number" min="200" max="60000" step="100" value="15000" inputmode="numeric" aria-label="详情间隔（毫秒）">
                 <button id="interval-increase" class="stepper-button" type="button" aria-label="增加详情间隔" title="增加 100 毫秒">+</button>
               </span>
               <small>ms</small>
@@ -209,8 +209,31 @@
       </section>
 
       <details class="version-history">
-        <summary><span>版本历史</span><small>v1.9.35 当前版本</small></summary>
+        <summary><span>版本历史</span><small>v1.9.47 当前版本</small></summary>
         <div class="version-history-list">
+          <article>
+            <strong>v1.9.47</strong>
+            <ul>
+              <li>默认详情间隔调整为 15 秒，运行期间修改间隔和并发可直接作用于当前任务。</li>
+              <li>并发通道池支持动态扩缩，调低后多余通道等待，调高后自动补充通道。</li>
+              <li>新增被动速度校准，记录真实请求节奏和验证事件；滑块完成后采用 3-5 分钟恢复冷却。</li>
+              <li>每日访问保护更新为插件 1280 条、平台 1300 条。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v1.9.39</strong>
+            <ul>
+              <li>验证触发后立即降为单并发并提高详情间隔，已有 worker 按实时并发上限等待，避免自适应参数变化后仍继续并发访问。</li>
+              <li>连续稳定采集 60 条后才逐步恢复速度，暂停时等待中的 worker 会立即退出。</li>
+              <li>手动完成滑块后增加 1-3 分钟恢复冷却，冷却结束再按原详情页或结果页断点续采。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v1.9.36</strong>
+            <ul>
+              <li>会员登录检查兼容采招网新版账号区、会员级别和用户中心标识，修复已登录却误报未登录。</li>
+            </ul>
+          </article>
           <article>
             <strong>v1.9.35</strong>
             <ul>

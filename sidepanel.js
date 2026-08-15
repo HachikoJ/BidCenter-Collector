@@ -26,8 +26,8 @@ const OFFICIAL_ADVANCED_FILTER_FALLBACKS = {
     '能源管理体系', '整合管理体系', '合规管理体系', '诚信管理体系', '业务连续性管理体系'
   ]
 };
-const PLATFORM_DAILY_LIMIT = 800;
-const PLUGIN_DAILY_LIMIT = 780;
+const PLATFORM_DAILY_LIMIT = 1300;
+const PLUGIN_DAILY_LIMIT = 1280;
 const INITIAL_TIME_RANGE = previousCalendarMonthRange();
 let latestState = {};
 let latestLogs = [];
@@ -37,7 +37,7 @@ let latestOfficialFilterOptions = OFFICIAL_ADVANCED_FILTER_FALLBACKS;
 let keywordOptions = [...DEFAULT_KEYWORDS];
 let draftWords = { exclude: [], related: [] };
 let settings = {
-  intervalMs: 5000, concurrency: 3,
+  intervalMs: 15000, concurrency: 3,
   informationTypes: [...DEFAULT_INFORMATION_TYPES],
   timeFilterMode: 'previous_calendar_month',
   timeRangeStart: INITIAL_TIME_RANGE.start, timeRangeEnd: INITIAL_TIME_RANGE.end,
@@ -155,7 +155,7 @@ function taskEstimate(state = {}, now = Date.now()) {
     currentPageRemaining + futurePages * pageSize + remainingTypes * totalPages * pageSize);
   const completedItems = completedRecordCount(state);
   const timing = taskTiming(state, now);
-  const intervalMs = Math.max(200, Number(state.settings?.intervalMs || settings.intervalMs) || 5000);
+  const intervalMs = Math.max(200, Number(state.settings?.intervalMs || settings.intervalMs) || 15000);
   const concurrency = Math.max(1, Number(state.settings?.concurrency || settings.concurrency) || 3);
   const configuredPerItemMs = Math.max(intervalMs / concurrency, 1550);
   const observedPerItemMs = completedItems >= Math.max(6, concurrency * 2) && timing.activeMs > 0
@@ -459,6 +459,10 @@ function syncKeywordOptions(values = []) {
 function statusLabel(state) {
   const batch = state.batchTotal ? `第 ${state.currentPage || 1} 页 ${state.batchDone || 0}/${state.batchTotal}` : `第 ${state.currentPage || 1} 页`;
   const type = state.currentType ? `${state.currentType} · ` : '';
+  const baseInterval = Number(state.settings?.intervalMs) || 0;
+  const adaptive = state.adaptive;
+  const throttleNote = adaptive && baseInterval && Number(adaptive.intervalMs) > baseInterval
+    ? `（已自适应降至 ${adaptive.intervalMs}ms · 并发${adaptive.concurrency}）` : '';
   return {
     idle: '尚未开始，输入关键词后开始采集。',
     searching: '正在打开后台检索页…',
@@ -467,7 +471,7 @@ function statusLabel(state) {
       : state.filterStage === 'advanced'
         ? '正在应用采购方式、资金来源等高级条件…'
         : `正在应用${state.timeFilterMode === 'custom' ? '自定义' : '上个月整月'}时间范围…`,
-    running: state.batchTotal ? `${type}正在批量读取 · ${batch}` : `${type}正在读取列表 · ${batch}`,
+    running: `${state.batchTotal ? `${type}正在批量读取 · ${batch}` : `${type}正在读取列表 · ${batch}`}${throttleNote}`,
     paused: `${type}任务已暂停，运行耗时已停止；点击“继续”恢复。`,
     verification_wait: state.verificationMode === 'manual'
       ? '网站要求滑块验证 · 请在已打开的验证页手动完成，完成后自动继续。'
@@ -508,8 +512,8 @@ function systemDiagnostic(state, errors = latestSystemErrors) {
     `运行耗时：${formatDuration(taskTiming(state).activeMs)}`,
     `暂停耗时：${formatDuration(taskTiming(state).pausedMs)}`,
     `任务时间预估：${estimateCaption(state)}`,
-    `详情间隔：${state.settings?.intervalMs || settings.intervalMs}ms`,
-    `并发数：${state.settings?.concurrency || settings.concurrency}`,
+    `详情间隔：基准 ${state.settings?.intervalMs || settings.intervalMs}ms，当前生效 ${state.adaptive?.intervalMs || state.settings?.intervalMs || settings.intervalMs}ms`,
+    `并发数：基准 ${state.settings?.concurrency || settings.concurrency}，当前生效 ${state.adaptive?.concurrency || state.settings?.concurrency || settings.concurrency}`,
     `今日插件详情访问：${latestQuota.used}/${latestQuota.limit}`,
     `平台每日上限：${latestQuota.platformLimit}`,
     `额度统计日期：${latestQuota.date}`,
@@ -617,10 +621,13 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
   }
   if (!settingsDirty) {
     const currentSettings = { ...settings, ...(state.settings || {}) };
-    $('#interval').value = currentSettings.intervalMs;
-    $('#concurrency').value = currentSettings.concurrency;
+    // 显示生效值：触发验证自动降速后，设置区反映实际间隔/并发（用户手动改动前）
+    const effectiveInterval = Number(state.adaptive?.intervalMs) || currentSettings.intervalMs;
+    const effectiveConcurrency = Number(state.adaptive?.concurrency) || currentSettings.concurrency;
+    $('#interval').value = effectiveInterval;
+    $('#concurrency').value = effectiveConcurrency;
     document.querySelectorAll('[data-concurrency]').forEach((button) => {
-      button.classList.toggle('selected', Number(button.dataset.concurrency) === Number(currentSettings.concurrency));
+      button.classList.toggle('selected', Number(button.dataset.concurrency) === Number(effectiveConcurrency));
     });
     renderInformationTypeSelection(state.informationTypes || currentSettings.informationTypes || DEFAULT_INFORMATION_TYPES);
     renderTimeSelection({
@@ -648,8 +655,25 @@ function render(state = {}, logs = latestLogs, systemErrors = latestSystemErrors
   renderSystemErrors();
 }
 
+// —— 被动速度校准：与 background.js 的 calibrationStats 同构 ——
+function calibrationStats(log = []) {
+  const now = Date.now();
+  const opens = log.filter((entry) => entry.kind === 'open').map((entry) => Number(entry.time) || 0);
+  const verifies = log.filter((entry) => entry.kind === 'verify').map((entry) => Number(entry.time) || 0);
+  const lastVerify = verifies.length ? Math.max(...verifies) : 0;
+  return {
+    opens10m: opens.filter((t) => now - t < 600000).length,
+    opens60m: opens.filter((t) => now - t < 3600000).length,
+    minSinceVerify: lastVerify ? Math.round((now - lastVerify) / 60000) : null,
+    verifies24h: verifies.filter((t) => now - t < 86400000).length
+  };
+}
+
+let latestCalibrationStats = null;
+
 async function getState() {
-  const stored = await chrome.storage.local.get(['task', 'taskLogs', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', INTERVAL_DEFAULT_MIGRATION_KEY]);
+  const stored = await chrome.storage.local.get(['task', 'taskLogs', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', 'calibrationLog', INTERVAL_DEFAULT_MIGRATION_KEY]);
+  latestCalibrationStats = calibrationStats(stored.calibrationLog || []);
   let task = stored.task || {};
   let collectorSettings = stored.collectorSettings || {};
   const { taskLogs = [], systemErrors = [], dailyQuotaUsage = {}, officialAdvancedFilterOptions = {} } = stored;
@@ -699,10 +723,11 @@ $('#pause').addEventListener('click', async () => {
   await getState();
 });
 $('#resume').addEventListener('click', async () => {
-  const intervalMs = Math.min(30000, Math.max(200, Number($('#interval').value) || 5000));
-  settings = { ...settings, intervalMs };
+  const intervalMs = Math.min(60000, Math.max(200, Number($('#interval').value) || 15000));
+  const concurrency = Math.min(6, Math.max(1, Number($('#concurrency').value) || 3));
+  settings = { ...settings, intervalMs, concurrency };
   await chrome.storage.local.set({ collectorSettings: settings });
-  const response = await chrome.runtime.sendMessage({ type: 'RESUME_SILENT', intervalMs });
+  const response = await chrome.runtime.sendMessage({ type: 'RESUME_SILENT', intervalMs, concurrency });
   if (response?.loginRequired) return getState();
   if (response?.error) await reportSidepanelError(new Error(response.error), '继续任务', false);
   else {
@@ -720,7 +745,7 @@ function readSettings() {
   }
   if (timeRangeStart > timeRangeEnd) throw new Error('开始日期不能晚于结束日期。');
   const next = {
-    intervalMs: Math.min(30000, Math.max(200, Number($('#interval').value) || 5000)),
+    intervalMs: Math.min(60000, Math.max(200, Number($('#interval').value) || 15000)),
     concurrency: Math.min(6, Math.max(1, Number($('#concurrency').value) || 3)),
     informationTypes: selectedInformationTypes(),
     timeFilterMode, timeRangeStart, timeRangeEnd,
@@ -733,11 +758,26 @@ function readSettings() {
   return next;
 }
 
+// 实时设置推送：间隔/并发改动后防抖 600ms 推给 background，运行中即时生效
+let liveSettingsPushTimer = 0;
+function scheduleLiveSettingsPush() {
+  if (liveSettingsPushTimer) clearTimeout(liveSettingsPushTimer);
+  liveSettingsPushTimer = setTimeout(() => {
+    liveSettingsPushTimer = 0;
+    const intervalMs = Math.min(60000, Math.max(200, Number($('#interval').value) || 15000));
+    const concurrency = Math.min(6, Math.max(1, Number($('#concurrency').value) || 3));
+    settings = { ...settings, intervalMs, concurrency };
+    chrome.storage.local.set({ collectorSettings: settings });
+    chrome.runtime.sendMessage({ type: 'UPDATE_RUN_SETTINGS', intervalMs, concurrency }).catch(() => undefined);
+  }, 600);
+}
+
 function adjustInterval(delta) {
   const input = $('#interval');
-  const current = Number(input.value) || 5000;
-  input.value = Math.min(30000, Math.max(200, current + delta));
+  const current = Number(input.value) || 15000;
+  input.value = Math.min(60000, Math.max(200, current + delta));
   settingsDirty = true;
+  scheduleLiveSettingsPush();
 }
 
 function exportableRecords(state) {
@@ -826,8 +866,8 @@ $('#logs').addEventListener('scroll', () => {
 });
 $('#log-filter').addEventListener('change', () => { logsFollowTail = true; renderLogs(); });
 ['#interval', '#concurrency'].forEach((selector) => {
-  $(selector).addEventListener('input', () => { settingsDirty = true; });
-  $(selector).addEventListener('change', () => { settingsDirty = true; });
+  $(selector).addEventListener('input', () => { settingsDirty = true; scheduleLiveSettingsPush(); });
+  $(selector).addEventListener('change', () => { settingsDirty = true; scheduleLiveSettingsPush(); });
 });
 document.querySelectorAll('#information-types input').forEach((input) => {
   input.addEventListener('change', () => {
@@ -890,6 +930,7 @@ document.querySelectorAll('[data-concurrency]').forEach((button) => {
     $('#concurrency').value = button.dataset.concurrency;
     document.querySelectorAll('[data-concurrency]').forEach((item) => item.classList.toggle('selected', item === button));
     settingsDirty = true;
+    scheduleLiveSettingsPush();
   });
 });
 $('#interval-decrease').addEventListener('click', () => adjustInterval(-100));
@@ -950,7 +991,11 @@ document.addEventListener('click', (event) => {
 $('#diagnose').addEventListener('click', async () => {
   const state = await getState();
   const timing = taskTiming(state);
-  const detail = `状态=${state.status || 'idle'}；运行耗时=${formatDuration(timing.activeMs)}；暂停耗时=${formatDuration(timing.pausedMs)}；时间预估=${estimateCaption(state)}；检索时间=${state.timeRangeStart && state.timeRangeEnd ? `${state.timeFilterMode === 'custom' ? '自定义' : '上个月整月'} ${state.timeRangeStart}至${state.timeRangeEnd}` : '未开始'}；信息类型=${(state.informationTypes || selectedInformationTypes()).join('、') || '未选择'}；高级筛选=${Object.values(state.advancedFilters || advancedFilterSelections()).join('、')}；排除词=${(state.excludeWords || draftWords.exclude).join('、') || '无'}；相关词=${(state.relatedWords || draftWords.related).join('、') || '无'}；分页=${state.currentPage || '-'}/${state.totalPages || '-'}；本页=${state.batchDone || 0}/${state.batchTotal || 0}；已抓取=${exportableRecords(state).length}；错误=${state.batchFailed || 0}；今日访问=${latestQuota.used}/${latestQuota.limit}；平台上限=${latestQuota.platformLimit}`;
+  const cal = latestCalibrationStats;
+  const calLine = cal
+    ? `；速度校准=当前 ${state.adaptive?.intervalMs || state.settings?.intervalMs || '-'}ms/${state.adaptive?.concurrency || state.settings?.concurrency || '-'}并发·近10分钟 ${cal.opens10m} 次·近1小时 ${cal.opens60m} 次·距上次验证 ${cal.minSinceVerify ?? '无'} 分钟·24h 验证 ${cal.verifies24h} 次`
+    : '';
+  const detail = `状态=${state.status || 'idle'}；运行耗时=${formatDuration(timing.activeMs)}；暂停耗时=${formatDuration(timing.pausedMs)}；时间预估=${estimateCaption(state)}；检索时间=${state.timeRangeStart && state.timeRangeEnd ? `${state.timeFilterMode === 'custom' ? '自定义' : '上个月整月'} ${state.timeRangeStart}至${state.timeRangeEnd}` : '未开始'}；信息类型=${(state.informationTypes || selectedInformationTypes()).join('、') || '未选择'}；高级筛选=${Object.values(state.advancedFilters || advancedFilterSelections()).join('、')}；排除词=${(state.excludeWords || draftWords.exclude).join('、') || '无'}；相关词=${(state.relatedWords || draftWords.related).join('、') || '无'}；分页=${state.currentPage || '-'}/${state.totalPages || '-'}；本页=${state.batchDone || 0}/${state.batchTotal || 0}；已抓取=${exportableRecords(state).length}；错误=${state.batchFailed || 0}；今日访问=${latestQuota.used}/${latestQuota.limit}；平台上限=${latestQuota.platformLimit}${calLine}`;
   await chrome.runtime.sendMessage({ type: 'ADD_LOG', level: 'info', message: '诊断快照', detail });
 });
 $('#copy-logs').addEventListener('click', async () => {
