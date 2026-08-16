@@ -327,11 +327,11 @@ async function saveTask(patch) {
 
 function log(level, message, detail = '') {
   logQueue = logQueue.then(async () => {
-    const { taskLogs = [] } = await chrome.storage.local.get('taskLogs');
+    const { taskLogs = [] } = await chrome.storage.session.get('taskLogs');
     const logs = [...taskLogs, {
       time: new Date().toISOString(), level, message, detail: String(detail || '')
-    }].slice(-500);
-    await chrome.storage.local.set({ taskLogs: logs });
+    }];
+    await chrome.storage.session.set({ taskLogs: logs });
   });
   return logQueue;
 }
@@ -371,7 +371,9 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     startedAt: new Date().toISOString(), pausedAt: '', totalPausedMs: 0, endedAt: '',
     updatedAt: new Date().toISOString()
   } });
-  await chrome.storage.local.set({ taskLogs: [] });
+  await logQueue;
+  await chrome.storage.session.set({ taskLogs: [] });
+  await chrome.storage.local.remove('taskLogs');
   await chrome.action.setBadgeText({ text: '' });
   await log('info', '开始后台搜索', `${keyword}；会员登录已校验；${timeLabel} ${timeRange.start} 至 ${timeRange.end}；高级筛选 ${advancedSummary}；排除词 ${settings.excludeWords.length}/5；相关词 ${settings.relatedWords.length}/5；依次筛选 ${informationTypes.join(' → ')}；间隔 ${settings.intervalMs}ms；并发 ${settings.concurrency}`);
   let tab;
@@ -1060,8 +1062,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'CLEAR_TASK') {
     (async () => {
       await stopTask();
-      await Promise.allSettled([progressQueue, partialQueue]);
+      await Promise.allSettled([progressQueue, partialQueue, logQueue]);
       await chrome.storage.local.remove(['task', 'taskLogs']);
+      await chrome.storage.session.remove('taskLogs');
       await chrome.action.setBadgeText({ text: '' });
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ error: error.message }));
@@ -1097,11 +1100,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'RESET_SETTINGS') {
     (async () => {
       await stopTask();
-      await Promise.allSettled([progressQueue, partialQueue]);
+      await Promise.allSettled([progressQueue, partialQueue, logQueue]);
       await chrome.storage.local.remove([
         'task', 'taskLogs', 'collectorSettings', 'systemErrors', 'calibrationLog',
         'officialAdvancedFilterOptions', 'keywordOptions', 'intervalDefault5000Migrated', ACTIVATION_STORAGE_KEY
       ]);
+      await chrome.storage.session.remove('taskLogs');
       await chrome.action.setBadgeText({ text: '' });
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ error: error.message }));

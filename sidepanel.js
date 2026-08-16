@@ -559,12 +559,14 @@ function renderLogs() {
   const filter = $('#log-filter').value;
   const logs = filter === 'all' ? latestLogs : latestLogs.filter((entry) => entry.level === filter);
   const logsEl = $('#logs');
-  logsEl.replaceChildren(...logs.slice(-180).map((entry) => {
+  const fragment = document.createDocumentFragment();
+  logs.forEach((entry) => {
     const row = document.createElement('div');
     row.className = `log ${entry.level || 'info'}`;
     row.innerHTML = `<time>${formatTime(entry.time)}</time>${escapeHtml(entry.message)}${entry.detail ? ` · ${escapeHtml(entry.detail)}` : ''}`;
-    return row;
-  }));
+    fragment.append(row);
+  });
+  logsEl.replaceChildren(fragment);
   $('#log-count').textContent = `${latestLogs.length} 条`;
   if (logsFollowTail) logsEl.scrollTop = logsEl.scrollHeight;
 }
@@ -672,11 +674,15 @@ function calibrationStats(log = []) {
 let latestCalibrationStats = null;
 
 async function getState() {
-  const stored = await chrome.storage.local.get(['task', 'taskLogs', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', 'calibrationLog', INTERVAL_DEFAULT_MIGRATION_KEY]);
+  const [stored, sessionStored] = await Promise.all([
+    chrome.storage.local.get(['task', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', 'calibrationLog', INTERVAL_DEFAULT_MIGRATION_KEY]),
+    chrome.storage.session.get('taskLogs')
+  ]);
   latestCalibrationStats = calibrationStats(stored.calibrationLog || []);
   let task = stored.task || {};
   let collectorSettings = stored.collectorSettings || {};
-  const { taskLogs = [], systemErrors = [], dailyQuotaUsage = {}, officialAdvancedFilterOptions = {} } = stored;
+  const { taskLogs = [] } = sessionStored;
+  const { systemErrors = [], dailyQuotaUsage = {}, officialAdvancedFilterOptions = {} } = stored;
   if (!stored[INTERVAL_DEFAULT_MIGRATION_KEY]) {
     const migration = { [INTERVAL_DEFAULT_MIGRATION_KEY]: true };
     if (Number(collectorSettings.intervalMs) === 3000) {
@@ -1021,6 +1027,10 @@ window.addEventListener('unhandledrejection', (event) => {
   reportSidepanelError(event.reason instanceof Error ? event.reason : new Error(String(event.reason)), '未处理的 Promise 异常').catch(() => undefined);
 });
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'session') {
+    if (activationReady && changes.taskLogs) getState().catch(reportReadError);
+    return;
+  }
   if (area !== 'local') return;
   if (changes[ACTIVATION_STORAGE_KEY]) {
     const isActivated = changes[ACTIVATION_STORAGE_KEY].newValue?.activated === true;
@@ -1028,8 +1038,14 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (isActivated) startStatePolling();
     return;
   }
-  if (!activationReady || !(changes.task || changes.taskLogs || changes.systemErrors || changes.dailyQuotaUsage || changes.officialAdvancedFilterOptions || changes.keywordOptions)) return;
+  if (!activationReady || !(changes.task || changes.systemErrors || changes.dailyQuotaUsage || changes.officialAdvancedFilterOptions || changes.keywordOptions)) return;
   getState().catch(reportReadError);
+});
+
+window.addEventListener('pagehide', () => {
+  if (['idle', 'complete', 'stopped'].includes(latestState.status || 'idle')) {
+    chrome.storage.session.remove('taskLogs').catch(() => undefined);
+  }
 });
 initializeSidepanel().catch(reportReadError);
 
