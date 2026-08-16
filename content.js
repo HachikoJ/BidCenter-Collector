@@ -41,6 +41,7 @@ const RESULT_LOAD_TIMEOUT = 45000;
 const RESULT_STABLE_FOR = 800;
 const DETAIL_LOAD_TIMEOUT = 30000;
 const DETAIL_STABLE_FOR = 3000;
+const NETWORK_RETRY_STORAGE_KEY = 'bidcenterCollectorNetworkRetry';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const text = (element) => element?.innerText?.replace(/\s+/g, ' ').trim() || '';
 const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
@@ -396,9 +397,48 @@ async function taskState() {
   return task;
 }
 
+function isTransientNetworkError(error) {
+  const message = `${error?.name || ''} ${error?.message || ''} ${String(error || '')}`;
+  return /Failed to fetch|fetch failed|NetworkError|Network request failed|Load failed|net::ERR_|ERR_(?:CONNECTION|NETWORK|INTERNET|NAME|TIMED_OUT)|网络错误|网络请求失败|网络连接.*(?:中断|失败)|连接已重置|连接超时/i.test(message);
+}
+
+function networkErrorVisible() {
+  const body = document.body?.innerText || '';
+  return /ERR_[A-Z_]+|无法访问此网站|网页无法打开|网络错误|网络请求失败|网络连接.*(?:中断|失败)|连接已重置|连接超时/i
+    .test(`${document.title || ''} ${body.slice(0, 1600)}`);
+}
+
+function clearNetworkRetry() {
+  try {
+    const hadRetry = Boolean(sessionStorage.getItem(NETWORK_RETRY_STORAGE_KEY));
+    sessionStorage.removeItem(NETWORK_RETRY_STORAGE_KEY);
+    return hadRetry;
+  } catch (_) { return false; }
+}
+
+async function retryCurrentPageOnce(error, context) {
+  const state = await taskState();
+  if (!['searching', 'filtering', 'running'].includes(state.status)) return false;
+  const retryUrl = location.href;
+  let previous = null;
+  try { previous = JSON.parse(sessionStorage.getItem(NETWORK_RETRY_STORAGE_KEY) || 'null'); } catch (_) { /* ignore */ }
+  if (previous?.url === retryUrl && Number(previous.count) >= 1) return false;
+  try { sessionStorage.setItem(NETWORK_RETRY_STORAGE_KEY, JSON.stringify({ url: retryUrl, count: 1 })); } catch (_) { /* ignore */ }
+  const message = error?.message || String(error || '页面加载失败');
+  await saveTask({ networkRetryUrl: retryUrl, networkRetryCount: 1, error: '' });
+  addLog('warn', '网络异常，自动刷新一次', `${context}：${message}；${retryUrl}`);
+  if (/#\/des\/customDesSearch\/\d+/i.test(location.hash)) {
+    await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_RETRYING', error: message }).catch(() => undefined);
+  }
+  await sleep(800);
+  location.reload();
+  return true;
+}
+
 async function recordContentError(error, context) {
   const state = await taskState();
   const message = error?.message || String(error || '未知错误');
+  if (isTransientNetworkError(error) && await retryCurrentPageOnce(error, context)) return state;
   const errorDetails = {
     time: new Date().toISOString(), message, stack: error?.stack || '',
     url: location.href, context, source: 'content'
@@ -487,6 +527,7 @@ async function waitForStableResults({ differentFrom = '', expectedPage = 0 } = {
   let signature = '';
   let stableSince = 0;
   while (Date.now() - startedAt < RESULT_LOAD_TIMEOUT) {
+    if (networkErrorVisible()) return [];
     const entries = listEntries();
     const current = resultSignature(entries);
     const pageReady = !expectedPage || pageNumber() === expectedPage;
@@ -1235,10 +1276,16 @@ async function processResults() {
         await waitAndReloadAfterVerification();
         return;
       }
-      const error = '搜索结果加载超时，未检测到可采集的详情链接。';
+      const error = state.networkRetryCount
+        ? '搜索结果自动刷新一次后仍加载失败，未检测到可采集的详情链接。'
+        : '搜索结果加载超时，未检测到可采集的详情链接。';
+      if (await retryCurrentPageOnce(new Error(error), '结果页加载')) return;
       await saveTask({ status: 'error', error, pausedAt: state.pausedAt || new Date().toISOString() });
       addLog('error', '结果页加载失败', error);
       return;
+    }
+    if (clearNetworkRetry()) {
+      state = await saveTask({ networkRetryUrl: '', networkRetryCount: 0 });
     }
     const currentUrl = location.href;
     const currentPage = pageNumber();
@@ -1328,6 +1375,7 @@ async function processResults() {
     const state = await taskState();
     if (['stopped', 'paused', 'daily_limit'].includes(state.status)) return;
     const message = error.message || '页面采集发生未知错误。';
+    if (isTransientNetworkError(error) && await retryCurrentPageOnce(error, '结果页处理')) return;
     const errorDetails = {
       time: new Date().toISOString(), message, stack: error.stack || '',
       url: location.href, context: `结果页处理；关键词=${state.keyword || ''}`, source: 'content'
@@ -1355,7 +1403,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message.type === 'SCRAPE_DETAIL') {
-    waitForDetailReady().then((ready) => {
+    waitForDetailReady().then(async (ready) => {
+      if (ready && clearNetworkRetry()) await saveTask({ networkRetryUrl: '', networkRetryCount: 0 });
       sendResponse(ready ? { ready: true, record: scrapeDetail() } : { ready: false });
     });
     return true;
@@ -1404,7 +1453,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (/#\/des\/customDesSearch\/\d+/i.test(location.hash)) {
     const ready = await waitForDetailReady();
-    if (ready) await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_READY', record: scrapeDetail() });
+    if (ready) {
+      if (clearNetworkRetry()) await saveTask({ networkRetryUrl: '', networkRetryCount: 0 });
+      await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_READY', record: scrapeDetail() });
+    }
     else await chrome.runtime.sendMessage({ type: 'DETAIL_PAGE_FAILED', error: '详情页未出现可采集内容。' });
     return;
   }

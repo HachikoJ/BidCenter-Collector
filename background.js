@@ -1,4 +1,5 @@
 const DETAIL_TIMEOUT = 45000;
+const BIDCENTER_HOME_URL = 'https://www.bidcenter.com.cn/';
 const DETAIL_STAGGER_MIN_MS = 100;
 const DETAIL_STAGGER_MAX_MS = 3000;
 const DETAIL_INTERVAL_JITTER_MIN_MS = -2000;
@@ -118,6 +119,21 @@ async function waitForTabComplete(tabId, timeoutMs = 20000) {
     };
     chrome.tabs.onUpdated.addListener(listener);
   });
+}
+
+async function focusBidcenterHomepage() {
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+  const homeTab = tabs.find((tab) => {
+    try {
+      const url = new URL(tab.url || tab.pendingUrl || '');
+      return url.hostname === 'www.bidcenter.com.cn' && url.pathname === '/';
+    } catch (_) { return false; }
+  });
+  if (homeTab?.id) {
+    await chrome.tabs.update(homeTab.id, { active: true });
+    return homeTab;
+  }
+  return chrome.tabs.create({ url: BIDCENTER_HOME_URL, active: true });
 }
 
 async function memberLoginStatus({ preferredTabId = 0, allowProbe = true } = {}) {
@@ -347,6 +363,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     typeFilterApplied: false, typeFilterPending: '', filterStage: '',
     timeFilterMode: settings.timeFilterMode, timeRangeStart: timeRange.start, timeRangeEnd: timeRange.end,
     timeFilterApplied: false, listUrl: url, awaitingSignature: '', error: '',
+    networkRetryUrl: '', networkRetryCount: 0,
     verificationUntil: 0, verificationMode: '', verificationRiskType: '', verificationTabIds: [], verificationUrl: '',
     verificationResumeStatus: '',
     advancedFilters: settings.advancedFilters, excludeWords: settings.excludeWords,
@@ -366,6 +383,12 @@ async function startSilentSearch(keyword, rawSettings = {}) {
   }
   await saveTask({ listTabId: tab.id });
   await log('info', '已创建后台结果页', url);
+  try {
+    const homeTab = await focusBidcenterHomepage();
+    await log('info', '前台已切换到采招网首页', homeTab.url || BIDCENTER_HOME_URL);
+  } catch (error) {
+    await log('warn', '无法自动切换到采招网首页', error.message || String(error));
+  }
   return { started: true };
 }
 
@@ -506,10 +529,42 @@ function originalVerificationTarget(state = {}, pendingUrl = '') {
   return /(?:\/alivalidate|captcha|verify)/i.test(candidate) ? (state.listUrl || '') : candidate;
 }
 
+async function detailTabHasNetworkError(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab) return false;
+  if (tab.status === 'loading' || /^chrome-error:/i.test(tab.url || '')) return true;
+  try {
+    const [execution] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({
+        title: document.title || '',
+        body: (document.body?.innerText || '').slice(0, 1200)
+      })
+    });
+    return /ERR_[A-Z_]+|无法访问此网站|网页无法打开|网络错误|网络请求失败|网络连接.*(?:中断|失败)|连接已重置|连接超时/i
+      .test(`${execution?.result?.title || ''} ${execution?.result?.body || ''}`);
+  } catch (error) {
+    return /chrome-error|Cannot access contents|无法访问页面内容/i.test(error.message || '');
+  }
+}
+
 function armDetailTimeout(tabId, pending) {
   clearTimeout(pending.timer);
   pending.timer = setTimeout(async () => {
     if (activeDetailTabs.get(tabId) !== pending) return;
+    const networkError = (pending.networkReloads || 0) < 1 && await detailTabHasNetworkError(tabId);
+    if (activeDetailTabs.get(tabId) !== pending) return;
+    if (networkError) {
+      pending.networkReloads = 1;
+      await log('warn', '详情页网络异常，自动刷新一次', pending.title || pending.url);
+      try {
+        await chrome.tabs.reload(tabId);
+        armDetailTimeout(tabId, pending);
+        return;
+      } catch (error) {
+        await log('warn', '详情页自动刷新失败', error.message || String(error));
+      }
+    }
     activeDetailTabs.delete(tabId);
     await clearVerification(tabId);
     chrome.tabs.remove(tabId).catch(() => undefined);
@@ -519,7 +574,7 @@ function armDetailTimeout(tabId, pending) {
 
 function waitForDetail(tabId, url, title) {
   return new Promise((resolve, reject) => {
-    const pending = { resolve, reject, timer: 0, url, title };
+    const pending = { resolve, reject, timer: 0, url, title, networkReloads: 0 };
     activeDetailTabs.set(tabId, pending);
     armDetailTimeout(tabId, pending);
   });
@@ -876,6 +931,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'DETAIL_PAGE_FAILED' && sender.tab?.id) {
     finishDetail(sender.tab.id, null, message.error || '详情正文未加载。').catch(() => undefined);
     sendResponse({ ok: true });
+    return undefined;
+  }
+  if (message.type === 'DETAIL_PAGE_RETRYING' && sender.tab?.id) {
+    const pending = activeDetailTabs.get(sender.tab.id);
+    if (pending) {
+      pending.networkReloads = 1;
+      armDetailTimeout(sender.tab.id, pending);
+      log('warn', '详情页网络异常，自动刷新一次', `${pending.title || pending.url}；${message.error || ''}`).catch(() => undefined);
+    }
+    sendResponse({ ok: Boolean(pending) });
     return undefined;
   }
   if (message.type === 'HUMAN_VERIFICATION') {

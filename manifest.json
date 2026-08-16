@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "采招网采集助手",
-  "version": "1.9.48",
+  "version": "1.9.49",
   "description": "在用户已登录的采招网页面中按关键词采集公开可见的招投标信息。",
   "homepage_url": "https://github.com/HachikoJ/BidCenter-Collector",
   "permissions": ["storage", "tabs", "downloads", "unlimitedStorage", "scripting", "alarms", "sidePanel"],
