@@ -49,14 +49,27 @@ let keywordDirty = false;
 let logsFollowTail = true;
 let activationReady = false;
 let statePollingTimer = 0;
+let stateSyncTimer = 0;
+let stateReadPromise = null;
+let stateRefreshQueued = false;
+let renderedLogFilter = '';
+let renderedLogSourceCount = 0;
+let renderedLogTailSignature = '';
+let renderedSystemErrorsSignature = '';
+
+function stopStatePolling() {
+  if (statePollingTimer) clearInterval(statePollingTimer);
+  if (stateSyncTimer) clearInterval(stateSyncTimer);
+  statePollingTimer = 0;
+  stateSyncTimer = 0;
+}
 
 function showActivationView(isActivated) {
   activationReady = isActivated;
   $('#activation-screen').hidden = isActivated;
   $('#app-shell').hidden = !isActivated;
   if (!isActivated) {
-    if (statePollingTimer) clearInterval(statePollingTimer);
-    statePollingTimer = 0;
+    stopStatePolling();
     $('#activation-input').value = '';
     $('#activation-input').removeAttribute('aria-invalid');
     $('#activate-button').disabled = false;
@@ -70,7 +83,11 @@ function showActivationView(isActivated) {
 function startStatePolling() {
   if (!activationReady || statePollingTimer) return;
   getState().catch(reportReadError);
-  statePollingTimer = setInterval(() => getState().catch(reportReadError), 1000);
+  statePollingTimer = setInterval(() => {
+    $('#elapsed-time').textContent = timingCaption(latestState);
+    $('#time-estimate').textContent = estimateCaption(latestState, latestQuota);
+  }, 1000);
+  stateSyncTimer = setInterval(() => getState().catch(reportReadError), 15000);
 }
 
 async function initializeSidepanel() {
@@ -524,7 +541,7 @@ function systemDiagnostic(state, errors = latestSystemErrors) {
   errors.forEach((error, index) => {
     lines.push(
       '',
-      `#${index + 1} ${error.time || '未知时间'} [${error.source || 'unknown'}]`,
+      `#${index + 1} ${error.time || '未知时间'} [${error.source || 'unknown'}] [v${error.extensionVersion || '历史版本'}]`,
       `上下文：${error.context || '无'}`,
       `错误：${error.message || '未知错误'}`,
       `页面：${error.url || '无'}`,
@@ -555,25 +572,49 @@ function reportReadError(error) {
   reportSidepanelError(error, '读取任务状态').catch(() => undefined);
 }
 
+function logSignature(entry = {}) {
+  return `${entry.time || ''}\u0000${entry.level || ''}\u0000${entry.message || ''}\u0000${entry.detail || ''}`;
+}
+
+function createLogRow(entry) {
+  const row = document.createElement('div');
+  row.className = `log ${entry.level || 'info'}`;
+  const time = document.createElement('time');
+  time.textContent = formatTime(entry.time);
+  row.append(time, document.createTextNode(`${entry.message || ''}${entry.detail ? ` · ${entry.detail}` : ''}`));
+  return row;
+}
+
 function renderLogs() {
   const filter = $('#log-filter').value;
-  const logs = filter === 'all' ? latestLogs : latestLogs.filter((entry) => entry.level === filter);
   const logsEl = $('#logs');
+  const previousScrollTop = logsEl.scrollTop;
+  const prefixUnchanged = renderedLogSourceCount === 0
+    || logSignature(latestLogs[renderedLogSourceCount - 1]) === renderedLogTailSignature;
+  const canAppend = filter === renderedLogFilter
+    && latestLogs.length >= renderedLogSourceCount
+    && prefixUnchanged;
+  const source = canAppend ? latestLogs.slice(renderedLogSourceCount) : latestLogs;
   const fragment = document.createDocumentFragment();
-  logs.forEach((entry) => {
-    const row = document.createElement('div');
-    row.className = `log ${entry.level || 'info'}`;
-    row.innerHTML = `<time>${formatTime(entry.time)}</time>${escapeHtml(entry.message)}${entry.detail ? ` · ${escapeHtml(entry.detail)}` : ''}`;
-    fragment.append(row);
+  source.forEach((entry) => {
+    if (filter === 'all' || entry.level === filter) fragment.append(createLogRow(entry));
   });
-  logsEl.replaceChildren(fragment);
+  if (canAppend) logsEl.append(fragment);
+  else logsEl.replaceChildren(fragment);
+  renderedLogFilter = filter;
+  renderedLogSourceCount = latestLogs.length;
+  renderedLogTailSignature = logSignature(latestLogs.at(-1));
   $('#log-count').textContent = `${latestLogs.length} 条`;
   if (logsFollowTail) logsEl.scrollTop = logsEl.scrollHeight;
+  else if (!canAppend) logsEl.scrollTop = Math.min(previousScrollTop, Math.max(0, logsEl.scrollHeight - logsEl.clientHeight));
 }
 
 function renderSystemErrors() {
   const debugEl = $('#debug-logs');
   $('#debug-count').textContent = `${latestSystemErrors.length} 条`;
+  const signature = `${latestSystemErrors.length}:${latestSystemErrors.at(-1)?.time || ''}:${latestSystemErrors.at(-1)?.message || ''}`;
+  if (signature === renderedSystemErrorsSignature) return;
+  renderedSystemErrorsSignature = signature;
   if (!latestSystemErrors.length) {
     debugEl.innerHTML = '<div class="debug-empty">暂无插件运行错误</div>';
     return;
@@ -582,7 +623,7 @@ function renderSystemErrors() {
     const row = document.createElement('article');
     row.className = 'debug-entry';
     row.innerHTML = [
-      `<div class="debug-entry-head"><time>${formatTime(error.time)}</time><span class="debug-entry-source">[${escapeHtml(error.source || 'unknown')}]</span><span>${escapeHtml(error.context || '未标注上下文')}</span></div>`,
+      `<div class="debug-entry-head"><time>${formatTime(error.time)}</time><span class="debug-entry-source">[${escapeHtml(error.source || 'unknown')}]</span><span>v${escapeHtml(error.extensionVersion || '历史版本')}</span><span>${escapeHtml(error.context || '未标注上下文')}</span></div>`,
       `<div class="debug-entry-message">${escapeHtml(error.message || '未知错误')}</div>`,
       error.url ? `<div class="debug-entry-detail">页面：${escapeHtml(error.url)}</div>` : '',
       error.stack ? `<div class="debug-entry-detail">${escapeHtml(error.stack)}</div>` : ''
@@ -673,7 +714,7 @@ function calibrationStats(log = []) {
 
 let latestCalibrationStats = null;
 
-async function getState() {
+async function readState() {
   const [stored, sessionStored] = await Promise.all([
     chrome.storage.local.get(['task', 'collectorSettings', 'systemErrors', 'dailyQuotaUsage', 'officialAdvancedFilterOptions', 'keywordOptions', 'calibrationLog', INTERVAL_DEFAULT_MIGRATION_KEY]),
     chrome.storage.session.get('taskLogs')
@@ -706,6 +747,22 @@ async function getState() {
   settings = { ...settings, ...collectorSettings, ...(task.settings || {}) };
   render(task, taskLogs, systemErrors, dailyQuotaUsage, officialAdvancedFilterOptions);
   return task;
+}
+
+function getState() {
+  if (stateReadPromise) {
+    stateRefreshQueued = true;
+    return stateReadPromise.then(() => latestState);
+  }
+  stateReadPromise = readState().finally(() => {
+    const refreshAgain = stateRefreshQueued;
+    stateRefreshQueued = false;
+    stateReadPromise = null;
+    if (refreshAgain && activationReady && !document.hidden) {
+      queueMicrotask(() => getState().catch(reportReadError));
+    }
+  });
+  return stateReadPromise;
 }
 
 $('#start').addEventListener('click', async () => {
@@ -1028,7 +1085,10 @@ window.addEventListener('unhandledrejection', (event) => {
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session') {
-    if (activationReady && changes.taskLogs) getState().catch(reportReadError);
+    if (activationReady && changes.taskLogs) {
+      latestLogs = Array.isArray(changes.taskLogs.newValue) ? changes.taskLogs.newValue : [];
+      renderLogs();
+    }
     return;
   }
   if (area !== 'local') return;
@@ -1043,9 +1103,15 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 window.addEventListener('pagehide', () => {
+  stopStatePolling();
+  if (liveSettingsPushTimer) clearTimeout(liveSettingsPushTimer);
   if (['idle', 'complete', 'stopped'].includes(latestState.status || 'idle')) {
     chrome.storage.session.remove('taskLogs').catch(() => undefined);
   }
+});
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopStatePolling();
+  else if (activationReady) startStatePolling();
 });
 initializeSidepanel().catch(reportReadError);
 

@@ -1,3 +1,8 @@
+(() => {
+const CONTENT_SCRIPT_INSTANCE_KEY = '__bidcenterCollectorContentLoaded__';
+if (globalThis[CONTENT_SCRIPT_INSTANCE_KEY]) return;
+globalThis[CONTENT_SCRIPT_INSTANCE_KEY] = true;
+
 const RESULT_SELECTORS = {
   type: '.ssjg-leixing',
   title: 'a.ssjg-title[tid][href]',
@@ -1463,4 +1468,5 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const latestState = await taskState();
   if (isSearchResultsLocation()) await publishOfficialAdvancedFilterOptions();
   if (isSearchResultsLocation() && ['searching', 'filtering', 'running'].includes(latestState.status)) processResults();
+})();
 })();

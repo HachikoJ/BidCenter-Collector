@@ -1,5 +1,4 @@
 const DETAIL_TIMEOUT = 45000;
-const BIDCENTER_HOME_URL = 'https://www.bidcenter.com.cn/';
 const DETAIL_STAGGER_MIN_MS = 100;
 const DETAIL_STAGGER_MAX_MS = 3000;
 const DETAIL_INTERVAL_JITTER_MIN_MS = -2000;
@@ -18,9 +17,16 @@ const ADVANCED_FILTER_KEYS = ['purchaseMethod', 'fundingSource', 'evaluationMeth
 const PLATFORM_DAILY_LIMIT = 1300;
 const PLUGIN_DAILY_LIMIT = 1280;
 const ACTIVATION_STORAGE_KEY = 'collectorActivation';
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const LEGACY_DUPLICATE_CONTENT_ERROR = "Identifier 'RESULT_SELECTORS' has already been declared";
+const KEEPALIVE_ACTIVE_STATUSES = new Set(['searching', 'filtering', 'running', 'verification_wait']);
+const LOG_FLUSH_DELAY_MS = 300;
 const activeDetailTabs = new Map();
 const verificationTabs = new Set();
 let logQueue = Promise.resolve();
+let taskLogsCache = null;
+let logFlushTimer = 0;
+let keepaliveQueue = Promise.resolve();
 let systemErrorQueue = Promise.resolve();
 let progressQueue = Promise.resolve();
 let partialQueue = Promise.resolve();
@@ -121,19 +127,10 @@ async function waitForTabComplete(tabId, timeoutMs = 20000) {
   });
 }
 
-async function focusBidcenterHomepage() {
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  const homeTab = tabs.find((tab) => {
-    try {
-      const url = new URL(tab.url || tab.pendingUrl || '');
-      return url.hostname === 'www.bidcenter.com.cn' && url.pathname === '/';
-    } catch (_) { return false; }
-  });
-  if (homeTab?.id) {
-    await chrome.tabs.update(homeTab.id, { active: true });
-    return homeTab;
-  }
-  return chrome.tabs.create({ url: BIDCENTER_HOME_URL, active: true });
+async function focusCollectorListTab(tabId) {
+  const tab = await chrome.tabs.update(tabId, { active: true });
+  if (tab?.windowId) await chrome.windows.update(tab.windowId, { focused: true });
+  return tab;
 }
 
 async function memberLoginStatus({ preferredTabId = 0, allowProbe = true } = {}) {
@@ -277,9 +274,23 @@ function markDailyLimitReached(usage) {
 }
 
 function appendSystemError(details) {
-  systemErrorQueue = systemErrorQueue.then(async () => {
+  systemErrorQueue = systemErrorQueue.catch(() => undefined).then(async () => {
     const { systemErrors = [] } = await chrome.storage.local.get('systemErrors');
-    await chrome.storage.local.set({ systemErrors: [...systemErrors, details].slice(-100) });
+    const versionedDetails = { ...details, extensionVersion: details.extensionVersion || EXTENSION_VERSION };
+    await chrome.storage.local.set({ systemErrors: [...systemErrors, versionedDetails].slice(-100) });
+  });
+  return systemErrorQueue;
+}
+
+function removeResolvedLegacySystemError() {
+  systemErrorQueue = systemErrorQueue.catch(() => undefined).then(async () => {
+    const { systemErrors = [] } = await chrome.storage.local.get('systemErrors');
+    const retained = systemErrors.filter((error) => (
+      error?.extensionVersion || error?.message !== LEGACY_DUPLICATE_CONTENT_ERROR
+    ));
+    if (retained.length !== systemErrors.length) {
+      await chrome.storage.local.set({ systemErrors: retained });
+    }
   });
   return systemErrorQueue;
 }
@@ -304,14 +315,14 @@ globalThis.addEventListener?.('unhandledrejection', (event) => {
   recordSystemError(event.reason instanceof Error ? event.reason : new Error(String(event.reason)), 'Service Worker 未处理 Promise 异常').catch(() => undefined);
 });
 
+removeResolvedLegacySystemError().catch(() => undefined);
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
 });
 chrome.runtime.onStartup.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
 });
-// 常驻心跳（30 秒）：SW 冷启动时重建，防止空闲/长等待期间被 Chrome 回收导致任务冻结
-chrome.alarms.create('collector-keepalive', { periodInMinutes: 0.5 });
 
 async function taskState() {
   const { task = { status: 'idle', records: [], completedPages: [], logs: [] } } = await chrome.storage.local.get('task');
@@ -325,13 +336,67 @@ async function saveTask(patch) {
   return next;
 }
 
+function syncKeepaliveAlarm(status) {
+  keepaliveQueue = keepaliveQueue.catch(() => undefined).then(async () => {
+    if (KEEPALIVE_ACTIVE_STATUSES.has(status)) {
+      const existing = await chrome.alarms.get('collector-keepalive');
+      if (!existing) await chrome.alarms.create('collector-keepalive', { periodInMinutes: 0.5 });
+      return;
+    }
+    await chrome.alarms.clear('collector-keepalive');
+    await chrome.storage.session.remove('keepAliveAt');
+  });
+  return keepaliveQueue;
+}
+
+async function ensureTaskLogsCache() {
+  if (taskLogsCache) return taskLogsCache;
+  const { taskLogs = [] } = await chrome.storage.session.get('taskLogs');
+  taskLogsCache = Array.isArray(taskLogs) ? taskLogs : [];
+  return taskLogsCache;
+}
+
+function queueTaskLogWrite() {
+  logQueue = logQueue.catch(() => undefined).then(async () => {
+    const logs = await ensureTaskLogsCache();
+    await chrome.storage.session.set({ taskLogs: [...logs] });
+  });
+  return logQueue;
+}
+
+function scheduleTaskLogWrite() {
+  if (logFlushTimer) return;
+  logFlushTimer = setTimeout(() => {
+    logFlushTimer = 0;
+    queueTaskLogWrite().catch(() => undefined);
+  }, LOG_FLUSH_DELAY_MS);
+}
+
+function flushTaskLogs() {
+  if (logFlushTimer) clearTimeout(logFlushTimer);
+  logFlushTimer = 0;
+  return queueTaskLogWrite();
+}
+
+function resetTaskLogs(remove = false) {
+  if (logFlushTimer) clearTimeout(logFlushTimer);
+  logFlushTimer = 0;
+  logQueue = logQueue.catch(() => undefined).then(async () => {
+    taskLogsCache = [];
+    if (remove) await chrome.storage.session.remove('taskLogs');
+    else await chrome.storage.session.set({ taskLogs: [] });
+  });
+  return logQueue;
+}
+
 function log(level, message, detail = '') {
-  logQueue = logQueue.then(async () => {
-    const { taskLogs = [] } = await chrome.storage.session.get('taskLogs');
-    const logs = [...taskLogs, {
+  const entry = {
       time: new Date().toISOString(), level, message, detail: String(detail || '')
-    }];
-    await chrome.storage.session.set({ taskLogs: logs });
+  };
+  logQueue = logQueue.catch(() => undefined).then(async () => {
+    const logs = await ensureTaskLogsCache();
+    logs.push(entry);
+    scheduleTaskLogWrite();
   });
   return logQueue;
 }
@@ -371,8 +436,7 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     startedAt: new Date().toISOString(), pausedAt: '', totalPausedMs: 0, endedAt: '',
     updatedAt: new Date().toISOString()
   } });
-  await logQueue;
-  await chrome.storage.session.set({ taskLogs: [] });
+  await resetTaskLogs();
   await chrome.storage.local.remove('taskLogs');
   await chrome.action.setBadgeText({ text: '' });
   await log('info', '开始后台搜索', `${keyword}；会员登录已校验；${timeLabel} ${timeRange.start} 至 ${timeRange.end}；高级筛选 ${advancedSummary}；排除词 ${settings.excludeWords.length}/5；相关词 ${settings.relatedWords.length}/5；依次筛选 ${informationTypes.join(' → ')}；间隔 ${settings.intervalMs}ms；并发 ${settings.concurrency}`);
@@ -384,12 +448,12 @@ async function startSilentSearch(keyword, rawSettings = {}) {
     }
   }
   await saveTask({ listTabId: tab.id });
-  await log('info', '已创建后台结果页', url);
+  await log('info', '已创建结果列表页', url);
   try {
-    const homeTab = await focusBidcenterHomepage();
-    await log('info', '前台已切换到采招网首页', homeTab.url || BIDCENTER_HOME_URL);
+    const listTab = await focusCollectorListTab(tab.id);
+    await log('info', '前台已切换到结果列表页', listTab.url || url);
   } catch (error) {
-    await log('warn', '无法自动切换到采招网首页', error.message || String(error));
+    await log('warn', '无法自动切换到结果列表页', error.message || String(error));
   }
   return { started: true };
 }
@@ -839,6 +903,7 @@ async function stopTask() {
   const timing = taskTiming(finalState);
   await chrome.action.setBadgeText({ text: '' });
   await log('warn', '用户停止任务，请尽快导出 Excel', `运行 ${formatDuration(timing.activeMs)}；暂停 ${formatDuration(timing.pausedMs)}；避免浏览器清理或任务重置后结果失效无法下载`);
+  await flushTaskLogs();
 }
 
 async function resumeTask(requestedIntervalMs, requestedConcurrency) {
@@ -868,12 +933,23 @@ async function resumeTask(requestedIntervalMs, requestedConcurrency) {
   };
   await saveTask({ status: 'running', listTabId: tab.id, settings: taskSettings, adaptive, error: '', ...resumedTimingPatch(current) });
   await chrome.action.setBadgeText({ text: '' });
+  try {
+    const listTab = await focusCollectorListTab(tab.id);
+    await log('info', '前台已切换到结果列表页', listTab.url || current.listUrl || tab.url || '');
+  } catch (error) {
+    await log('warn', '无法自动切换到结果列表页', error.message || String(error));
+  }
   await log('info', '继续后台采集',
     `会员登录已校验；详情间隔 ${taskSettings.intervalMs}ms；并发 ${taskSettings.concurrency}${tookOver && (Number(prevAdaptive.intervalMs) > taskSettings.intervalMs || Number(prevAdaptive.concurrency) < taskSettings.concurrency) ? '；已按用户设置覆盖自适应降速（再触发验证会重新降速）' : ''}；${current.listUrl || tab.url || ''}`);
-  await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' }).catch(async () => {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+  await waitForTabComplete(tab.id);
+  try {
     await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' });
-  });
+  } catch (_) {
+    // 旧标签页可能来自插件重载前，刷新后由 Manifest 自动且仅注入一次内容脚本。
+    await chrome.tabs.reload(tab.id);
+    await waitForTabComplete(tab.id);
+    await chrome.tabs.sendMessage(tab.id, { type: 'RESUME_TASK' });
+  }
   return { resumed: true };
 }
 
@@ -1064,7 +1140,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       await stopTask();
       await Promise.allSettled([progressQueue, partialQueue, logQueue]);
       await chrome.storage.local.remove(['task', 'taskLogs']);
-      await chrome.storage.session.remove('taskLogs');
+      await resetTaskLogs(true);
       await chrome.action.setBadgeText({ text: '' });
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ error: error.message }));
@@ -1090,10 +1166,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'TASK_COMPLETE') {
     (async () => {
       const current = await taskState();
+      batchGeneration += 1;
+      for (const [tabId, pending] of activeDetailTabs) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error('任务已完成。'));
+        chrome.tabs.remove(tabId).catch(() => undefined);
+      }
+      activeDetailTabs.clear();
+      const verificationIds = new Set([
+        ...verificationTabs,
+        ...(Array.isArray(current.verificationTabIds) ? current.verificationTabIds : [])
+      ]);
+      for (const tabId of verificationIds) await chrome.alarms.clear(`verification-${tabId}`);
+      verificationTabs.clear();
       const timing = taskTiming(current);
       await log('warn', '采集完成，请尽快导出 Excel', `运行 ${formatDuration(timing.activeMs)}；暂停 ${formatDuration(timing.pausedMs)}；避免浏览器清理或任务重置后结果失效无法下载`);
+      await flushTaskLogs();
+      await syncKeepaliveAlarm('complete');
       await chrome.action.setBadgeText({ text: '' });
-      if (sender.tab?.id) await chrome.tabs.remove(sender.tab.id).catch(() => undefined);
+      const listTabId = sender.tab?.id || current.listTabId;
+      if (listTabId) await chrome.tabs.remove(listTabId).catch(() => undefined);
     })().catch(() => undefined);
     return undefined;
   }
@@ -1105,7 +1197,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         'task', 'taskLogs', 'collectorSettings', 'systemErrors', 'calibrationLog',
         'officialAdvancedFilterOptions', 'keywordOptions', 'intervalDefault5000Migrated', ACTIVATION_STORAGE_KEY
       ]);
-      await chrome.storage.session.remove('taskLogs');
+      await resetTaskLogs(true);
       await chrome.action.setBadgeText({ text: '' });
       sendResponse({ ok: true });
     })().catch((error) => sendResponse({ error: error.message }));
@@ -1116,8 +1208,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'collector-keepalive') {
-    // 常驻心跳：任何长等待/空闲期间写一次 storage，防止 Service Worker 被回收
-    await chrome.storage.local.set({ keepAliveAt: Date.now() }).catch(() => undefined);
+    const current = await taskState();
+    if (KEEPALIVE_ACTIVE_STATUSES.has(current.status)) {
+      await chrome.storage.session.set({ keepAliveAt: Date.now() }).catch(() => undefined);
+    } else {
+      await syncKeepaliveAlarm(current.status).catch(() => undefined);
+    }
     return;
   }
   const tabId = Number(alarm.name.match(/^verification-(\d+)$/)?.[1]);
@@ -1135,3 +1231,19 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     finishDetail(tabId, null, `验证后重新打开详情失败：${error.message}`).catch(() => undefined);
   });
 });
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'session' && changes.taskLogs) {
+    if (changes.taskLogs.newValue === undefined) taskLogsCache = [];
+    else if (taskLogsCache === null) {
+      taskLogsCache = Array.isArray(changes.taskLogs.newValue) ? changes.taskLogs.newValue : [];
+    }
+    return;
+  }
+  if (area !== 'local' || !changes.task) return;
+  const previousStatus = changes.task.oldValue?.status;
+  const nextStatus = changes.task.newValue?.status || 'idle';
+  if (previousStatus !== nextStatus) syncKeepaliveAlarm(nextStatus).catch(() => undefined);
+});
+
+taskState().then((task) => syncKeepaliveAlarm(task.status)).catch(() => undefined);

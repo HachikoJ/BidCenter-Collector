@@ -13,7 +13,7 @@
           <img class="activation-logo" src="logo.svg" alt="采招网采集助手 logo">
           <div>
             <div class="brand-kicker">BIDCENTER / COLLECTOR</div>
-            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v2.0</span></strong>
+            <strong class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v2.4</span></strong>
           </div>
         </header>
 
@@ -54,7 +54,7 @@
       <header class="topbar">
         <img class="brand-logo" src="logo.svg" alt="采招网采集助手 logo">
         <div class="brand-copy">
-          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v2.0</span></h1>
+          <h1 class="brand-title">采招网采集助手 <span class="version-badge" data-app-version>v2.4</span></h1>
           <div class="topbar-meta">
             <a class="project-link" href="https://github.com/HachikoJ/BidCenter-Collector" target="_blank" rel="noopener noreferrer" title="访问 GitHub 公开项目">GitHub 项目</a>
             <span>© 2026 Wilson</span>
@@ -209,8 +209,38 @@
       </section>
 
       <details class="version-history">
-        <summary><span>版本历史</span><small>v2.0 当前版本</small></summary>
+        <summary><span>版本历史</span><small>v2.4 当前版本</small></summary>
         <div class="version-history-list">
+          <article>
+            <strong>v2.4</strong>
+            <ul>
+              <li>内容脚本增加页面级单实例保护，意外重复注入时不再触发变量重复声明错误。</li>
+              <li>系统错误记录附带发生时的插件版本，并清理已修复的历史重复声明误报。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v2.3</strong>
+            <ul>
+              <li>点击开始或继续后自动激活采招网结果列表标签，并聚焦其所在浏览器窗口。</li>
+              <li>详情页继续在后台静默采集，不会抢占用户当前查看的结果列表页。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v2.2</strong>
+            <ul>
+              <li>修复跨日继续任务时结果页内容脚本可能被重复注入，并误报变量重复声明的问题。</li>
+              <li>恢复任务会先等待结果页加载完成；接收端缺失时刷新页面，由 Manifest 自动且仅注入一次内容脚本。</li>
+            </ul>
+          </article>
+          <article>
+            <strong>v2.1</strong>
+            <ul>
+              <li>操作日志改为内存队列批量写入和增量渲染，避免日志增长后反复复制、读取和重建全部节点。</li>
+              <li>侧栏状态读取自动合并，完整数据同步降为 15 秒兜底；运行耗时仍每秒更新。</li>
+              <li>后台心跳只在采集运行期间启用，并改用会话存储，空闲时不再周期写入磁盘。</li>
+              <li>侧栏隐藏或关闭后停止轮询，任务完成时主动清理定时器、验证记录和后台标签页。</li>
+            </ul>
+          </article>
           <article>
             <strong>v2.0</strong>
             <ul>
